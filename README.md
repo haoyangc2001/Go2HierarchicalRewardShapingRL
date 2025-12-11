@@ -285,6 +285,23 @@ Reach-Avoid 强化学习算法是专为避障导航任务设计的 PPO（Proxima
    cd ..
    ```
 
+   #### 3.3.4 安装 unitree_rl_gym
+   `unitree_rl_gym` 是 Unitree 机器人强化学习基础库。
+
+   ##### 3.3.4.1 下载
+   通过 Git 克隆仓库：
+   ```bash
+   git clone https://github.com/unitreerobotics/unitree_rl_gym.git
+   ```
+
+   ##### 3.3.4.2 安装
+   进入目录并安装：
+   ```bash
+   cd unitree_rl_gym
+   pip install -e .
+   cd ..
+   ```
+
    #### 3.4 安装项目依赖
    ```bash
    cd legged_gym_go2
