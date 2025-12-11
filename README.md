@@ -1,12 +1,12 @@
 # Go2 Hierarchical Reach-Avoid RL
 
-## 项目概述
+## 📋 项目概述
 
 Go2 Hierarchical Reach-Avoid RL 是一个基于强化学习的机器人导航系统，专为 Unitree Go2 机器人设计。该项目实现了一个分层控制架构，结合了预训练的低层级运动策略和可训练的高层级导航策略，使机器人能够在复杂环境中安全导航并到达目标位置。
 
-## 核心功能
+## 🔧 核心功能
 
-### 1. 分层控制架构
+### 🎯 1. 分层控制架构
 
 #### 低层级（Locomotion）
 - **功能**：将速度指令（线速度和角速度）转换为机器人的关节动作
@@ -36,7 +36,7 @@ Go2 Hierarchical Reach-Avoid RL 是一个基于强化学习的机器人导航系
 - **文件位置**：`legged_gym/scripts/train_reach_avoid.py` 中的 `HierarchicalVecEnv` 类
 - **核心方法**：`reset()`、`step()`、`close()`
 
-### 2. Reach-Avoid 强化学习算法
+### 🧠 2. Reach-Avoid 强化学习算法
 
 Reach-Avoid 强化学习算法是专为避障导航任务设计的 PPO（Proximal Policy Optimization）扩展版本，实现了到达目标位置（reach）和避免障碍物（avoid）的双重目标。
 
@@ -149,13 +149,13 @@ Reach-Avoid 强化学习算法是专为避障导航任务设计的 PPO（Proxima
    - 标准 PPO：基于奖励的策略更新
    - ReachAvoidPPO：考虑双重目标的策略更新
 
-### 3. 环境与仿真
+### 🌍 3. 环境与仿真
 
 - 基于 Isaac Gym 物理引擎的高性能仿真环境
 - 支持多环境并行训练
 - 提供丰富的环境观测和奖励信号
 
-### 4. 训练流程
+### 📋 4. 训练流程
 
 执行 `train_reach_avoid.py` 后，项目将启动完整的训练流程：
 
@@ -167,9 +167,9 @@ Reach-Avoid 强化学习算法是专为避障导航任务设计的 PPO（Proxima
 6. **性能评估**：计算并监控避障任务成功率
 7. **模型保存**：定期保存训练好的模型检查点
 
-## 技术架构
+## 📐 技术架构
 
-### 主要组件
+### 🧩 主要组件
 
 | 组件 | 描述 | 位置 |
 |------|------|------|
@@ -178,16 +178,16 @@ Reach-Avoid 强化学习算法是专为避障导航任务设计的 PPO（Proxima
 | ActorCritic | 策略网络架构 | `rsl_rl/modules/actor_critic.py` |
 | HighLevelNavigationEnv | 高层级导航封装 | `legged_gym/envs/go2/high_level_navigation_env.py` |
 
-### 网络架构
+### 🏗️ 网络架构
 
 - **Actor 网络**：4 层全连接网络，每层 512 个单元
 - **Critic 网络**：4 层全连接网络，每层 512 个单元
 - 激活函数：ReLU
 - 初始化噪声：标准差为 0.1 的高斯噪声
 
-## 环境配置
+## 📦 环境配置
 
-### 安装步骤
+### 📥 安装步骤
 
 #### 系统要求
 - **操作系统**：推荐 Ubuntu 18.04 或更高版本
@@ -203,69 +203,172 @@ Reach-Avoid 强化学习算法是专为避障导航任务设计的 PPO（Proxima
    ```
 
 2. **创建虚拟环境（推荐使用 Conda）**
+   
+   建议在虚拟环境中运行训练或部署程序，推荐使用 Conda 创建虚拟环境。如果您的系统中已经安装了 Conda，可以跳过步骤 2.1。
+
+   #### 2.1 下载并安装 MiniConda
+   MiniConda 是 Conda 的轻量级发行版，适用于创建和管理虚拟环境。使用以下命令下载并安装：
    ```bash
-   # 安装 Miniconda（如果未安装）
    mkdir -p ~/miniconda3
    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
    bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
    rm ~/miniconda3/miniconda.sh
-   
-   # 初始化 Conda
+   ```
+
+   安装完成后，初始化 Conda：
+   ```bash
    ~/miniconda3/bin/conda init --all
    source ~/.bashrc
-   
-   # 创建并激活虚拟环境
-   conda create -n go2-rl python=3.8
-   conda activate go2-rl
+   ```
+
+   #### 2.2 创建新环境
+   ```bash
+   conda create -n unitree-rl python=3.8
+   ```
+
+   #### 2.3 激活虚拟环境
+   ```bash
+   conda activate unitree-rl
    ```
 
 3. **安装依赖项**
    
-   - **安装 PyTorch**
-     ```bash
-     conda install pytorch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 pytorch-cuda=12.1 -c pytorch -c nvidia
-     ```
+   #### 3.1 安装 PyTorch
+   PyTorch 是一个神经网络计算框架，用于模型训练和推理。使用以下命令安装：
+   ```bash
+   conda install pytorch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 pytorch-cuda=12.1 -c pytorch -c nvidia
+   ```
    
-   - **安装 Isaac Gym**
-     ```bash
-     # 1. 从 NVIDIA 官网下载 Isaac Gym：https://developer.nvidia.com/isaac-gym
-     # 2. 解压到当前项目目录下的 isaacgym 文件夹
-     
-     # 安装 Isaac Gym Python 绑定
-     cd isaacgym/python
-     pip install -e .
-     
-     # 验证安装（可选）
-     cd examples
-     python 1080_balls_of_solitude.py
-     ```
+   #### 3.2 安装 Isaac Gym
+   Isaac Gym 是 Nvidia 提供的刚体仿真和训练框架。
+
+   ##### 3.2.1 下载
+   从 Nvidia 官网下载 [Isaac Gym](https://developer.nvidia.com/isaac-gym)。
+
+   ##### 3.2.2 安装
+   解压后进入 `isaacgym/python` 文件夹，执行以下命令安装：
+   ```bash
+   cd isaacgym/python
+   pip install -e .
+   ```
+
+   ##### 3.2.3 验证安装
+   运行以下命令，若弹出窗口并显示 1080 个球下落，则安装成功：
+   ```bash
+   cd examples
+   python 1080_balls_of_solitude.py
+   ```
+
+   如有问题，可参考 `isaacgym/docs/index.html` 中的官方文档。
+
+   #### 3.3 安装 rsl_rl
+   `rsl_rl` 是一个强化学习算法库。
+
+   ##### 3.3.1 下载
+   通过 Git 克隆仓库：
+   ```bash
+   cd ..
+   cd ..
+   git clone https://github.com/leggedrobotics/rsl_rl.git
+   ```
+
+   ##### 3.3.2 切换分支
+   切换到 v1.0.2 分支：
+   ```bash
+   cd rsl_rl
+   git checkout v1.0.2
+   ```
+
+   ##### 3.3.3 安装
+   ```bash
+   pip install -e .
+   cd ..
+   ```
+
+   #### 3.4 安装项目依赖
+   ```bash
+   cd legged_gym_go2
+   pip install -e .
    
-   - **安装项目依赖**
-     ```bash
-     # 返回项目根目录
-     cd ../..
-     cd legged_gym_go2
-     pip install -e .
-     ```
-   
-   - **安装其他依赖**
-     ```bash
-     pip install numpy matplotlib torchvision
-     ```
+   # 安装其他依赖
+   pip install numpy matplotlib torchvision
+   ```
 
 
-## 使用说明
+## 🛠️ 使用说明
 
-### 运行训练脚本
+### 📜 脚本说明
 
-确保已经激活虚拟环境并配置好环境变量后，运行以下命令：
+`legged_gym_go2/legged_gym/scripts/` 目录下包含以下核心脚本：
 
-```bash
-# 从项目根目录运行
-python legged_gym_go2/legged_gym/scripts/train_reach_avoid.py
-```
+#### 1. 训练脚本
 
-### 命令行参数
+##### `train_reach_avoid.py`
+- **功能**：实现分层避障任务的完整训练流程，结合预训练的低层级运动策略和可训练的高层级导航策略
+- **算法**：基于 Reach-Avoid PPO 算法
+- **使用命令**：
+  ```bash
+  python legged_gym_go2/legged_gym/scripts/train_reach_avoid.py
+  ```
+- **主要参数**：
+  - `--headless`：是否在无头模式下运行（默认：True）
+  - `--resume`：是否从 checkpoint 恢复训练
+  - `--experiment_name`：实验名称
+  - `--num_envs`：并行训练环境数量
+
+#### 2. 可视化与测试脚本
+
+##### `play_reach_avoid.py`
+- **功能**：可视化训练后的分层避障策略效果，展示机器人在复杂环境中导航避障的能力
+- **使用命令**：
+  ```bash
+  python legged_gym_go2/legged_gym/scripts/play_reach_avoid.py
+  ```
+- **主要参数**：
+  - `--model_path`：指定模型路径
+  - `--headless`：是否在无头模式下运行
+
+##### `play_fixed_commands_with_video.py`
+- **功能**：使用固定命令序列测试机器人的运动控制能力，并支持视频录制
+- **测试命令**：包含停止、前进、右移、右转等预设命令序列
+- **使用命令**：
+  ```bash
+  python legged_gym_go2/legged_gym/scripts/play_fixed_commands_with_video.py --task=go2
+  ```
+- **主要参数**：
+  - `--task`：机器人类型（固定为 go2）
+  - `--headless`：是否在无头模式下运行
+
+##### `plot_env_layout.py`
+- **功能**：可视化 GO2 高层级环境布局（目标+障碍物），并可叠加测试轨迹
+- **使用命令**：
+  ```bash
+  python legged_gym_go2/legged_gym/scripts/plot_env_layout.py
+  ```
+- **主要参数**：
+  - `--traj-file`：可选参数，指定由 test_reach_avoid.py 生成的 JSON 轨迹文件
+  - `--save`：可选参数，指定图像保存路径
+  - `--no-show`：跳过交互式窗口（用于保存到磁盘时）
+
+##### `test_reach_avoid.py`
+- **功能**：加载训练好的高层级reach-avoid策略，生成多个随机轨迹，并将XY路径保存到JSON文件中，供后续使用plot_env_layout.py可视化
+- **使用命令**：
+  ```bash
+  python legged_gym_go2/legged_gym/scripts/test_reach_avoid.py --checkpoint-path <model_path> --output traj_run.json
+  ```
+- **主要参数**：
+  - `--checkpoint-path`：必须参数，指定训练好的高层级checkpoint路径（.pt文件）
+  - `--num-trajs`：要记录的轨迹数量（默认：10）
+  - `--max-steps`：每个轨迹的最大高层级步数（默认：500）
+  - `--output`：存储XY路径的JSON文件名称（默认：reach_avoid_rollouts.json）
+  - `--low-level-model`：可选的预训练低层级运动策略覆盖
+  - `--num-envs`：用于rollouts的并行环境数量（默认：1）
+  - `--render`：在rollouts期间打开Isaac Gym查看器
+  - `--max-reset-attempts`：环境重置尝试的安全上限（默认：20）
+
+### ⚙️ 命令行参数
+
+所有脚本支持的通用参数：
 
 | 参数 | 描述 | 默认值 |
 |------|------|--------|
@@ -282,7 +385,7 @@ python legged_gym_go2/legged_gym/scripts/train_reach_avoid.py
 | --seed | 随机种子 | 42 |
 | --max_iterations | 最大训练迭代次数 | 10000 |
 
-### 示例命令
+### 📝 示例命令
 
 #### 基本训练
 ```bash
@@ -304,15 +407,20 @@ python legged_gym_go2/legged_gym/scripts/train_reach_avoid.py --rl_device=cuda:0
 python legged_gym_go2/legged_gym/scripts/train_reach_avoid.py --resume=true --experiment_name=high_level_go2
 ```
 
-### 配置文件
+#### 可视化训练效果
+```bash
+python legged_gym_go2/legged_gym/scripts/play_reach_avoid.py
+```
+
+### 📄 配置文件
 
 - 环境配置：`GO2HighLevelCfg`
 - 训练配置：`GO2HighLevelCfgPPO`
 - 可通过命令行参数覆盖配置值
 
-## 训练结果
+## 📊 训练结果
 
-### 输出信息
+### 📤 输出信息
 
 训练过程中，脚本会输出以下关键信息：
 
@@ -320,13 +428,13 @@ python legged_gym_go2/legged_gym/scripts/train_reach_avoid.py --resume=true --ex
 iter 00001 | success 0.000 | policy_loss -0.00123 | value_loss 0.12345 | Vmean 0.567 | Rmean 0.890 | Vrmse 0.123 | VexpVar 0.456 | adv_std 0.789 | elapsed 1.23s
 ```
 
-### 生成文件
+### 💾 生成文件
 
 - **模型检查点**：`logs/<experiment_name>/<timestamp>/model_<iteration>.pt`
 - **训练日志**：控制台输出，可重定向到文件
 - **GH 快照**：（可选）定期保存的状态快照
 
-## 项目结构
+## 📁 项目结构
 
 ```
 Go2HierarchicalReachAvoidRL/
@@ -338,7 +446,11 @@ Go2HierarchicalReachAvoidRL/
 │   │   │       ├── high_level_navigation_env.py # 高层级导航环境
 │   │   │       └── go2_env.py                   # 基础 Go2 环境
 │   │   ├── scripts/
-│   │   │   └── train_reach_avoid.py            # 训练脚本
+│   │   │   ├── train_reach_avoid.py            # 分层避障任务训练脚本
+│   │   │   ├── play_reach_avoid.py             # 避障策略可视化脚本
+│   │   │   ├── play_fixed_commands_with_video.py # 固定命令测试与视频录制脚本
+│   │   │   ├── plot_env_layout.py              # 环境布局可视化脚本
+│   │   │   └── test_reach_avoid.py             # 生成轨迹并保存到JSON文件的测试脚本
 │   │   └── utils/
 │   └── rsl_rl/
 │       ├── algorithms/
@@ -348,9 +460,9 @@ Go2HierarchicalReachAvoidRL/
 └── logs/                                       # 训练日志和模型保存目录
 ```
 
-## 训练流程详解
+## 🔄 训练流程详解
 
-### 1. 环境创建
+### 🟢 1. 环境创建
 
 `create_env` 函数创建分层环境：
 
@@ -365,7 +477,7 @@ def create_env(env_cfg, train_cfg, args, device) -> HierarchicalVecEnv:
     return HierarchicalVecEnv(base_env)
 ```
 
-### 2. 经验收集
+### 📊 2. 经验收集
 
 训练循环中，脚本收集固定长度的轨迹数据：
 
@@ -376,7 +488,7 @@ for step in range(horizon):
     # 存储轨迹数据
 ```
 
-### 3. 成功率计算
+### ✅ 3. 成功率计算
 
 `compute_reach_avoid_success_rate` 函数评估避障任务成功率：
 
@@ -387,7 +499,7 @@ def compute_reach_avoid_success_rate(g_sequence, h_sequence) -> float:
     # 返回成功率
 ```
 
-### 4. 策略更新
+### � 4. 策略更新
 
 使用 PPO 算法更新高层级策略：
 
@@ -395,9 +507,9 @@ def compute_reach_avoid_success_rate(g_sequence, h_sequence) -> float:
 policy_loss, value_loss = alg.update()
 ```
 
-## 扩展与自定义
+## 🚀 扩展与自定义
 
-### 1. 修改网络架构
+### 🏗️ 1. 修改网络架构
 
 在 `train_reach_avoid` 函数中修改网络尺寸：
 
@@ -406,7 +518,7 @@ train_cfg.policy.actor_hidden_dims = [512, 512, 512, 512]  # Actor 网络
  train_cfg.policy.critic_hidden_dims = [512, 512, 512, 512]  # Critic 网络
 ```
 
-### 2. 调整训练参数
+### ⚙️ 2. 调整训练参数
 
 修改 `GO2HighLevelCfgPPO` 配置：
 
@@ -416,7 +528,7 @@ train_cfg.policy.actor_hidden_dims = [512, 512, 512, 512]  # Actor 网络
 - 批量大小
 - 训练迭代次数
 
-### 3. 自定义环境
+### 🌍 3. 自定义环境
 
 扩展 `HierarchicalGO2Env` 类或修改 `HighLevelNavigationConfig` 配置，自定义环境特性：
 
@@ -425,7 +537,7 @@ train_cfg.policy.actor_hidden_dims = [512, 512, 512, 512]  # Actor 网络
 - 观测空间
 - 动作空间
 
-## 性能指标
+## 📈 性能指标
 
 训练过程中监控的关键指标：
 
@@ -438,10 +550,18 @@ train_cfg.policy.actor_hidden_dims = [512, 512, 512, 512]  # Actor 网络
 - **解释方差（VexpVar）**：价值函数解释回报变化的能力
 - **优势标准差（adv_std）**：优势函数的标准差
 
-## 示例应用场景
+## 🎯 示例应用场景
 
 1. **室内导航**：在办公室或家庭环境中自主导航
 2. **仓储物流**：在仓库环境中搬运物品
 3. **搜索救援**：在复杂环境中搜索目标
 4. **环境监测**：在特定区域内进行环境监测
+
+## 🎉 致谢
+
+本仓库开发离不开以下开源项目的支持与贡献，特此感谢：
+- [https://github.com/littlebearqqq/legged_gym_go2.git](https://github.com/littlebearqqq/legged_gym_go2.git): 构建训练与运行代码的基础。
+- rsl_rl: 强化学习算法实现。
+- mujoco: 提供强大仿真功能。
+- unitree_sdk2_python: 实物部署硬件通信接口。
 
