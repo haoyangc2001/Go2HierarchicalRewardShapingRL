@@ -577,8 +577,8 @@ train_cfg.policy.actor_hidden_dims = [512, 512, 512, 512]  # Actor 网络
 ## 🎉 致谢
 
 本仓库开发离不开以下开源项目的支持与贡献，特此感谢：
-- [https://github.com/littlebearqqq/legged_gym_go2.git](https://github.com/littlebearqqq/legged_gym_go2.git): 构建训练与运行代码的基础。
-- rsl_rl: 强化学习算法实现。
-- mujoco: 提供强大仿真功能。
-- unitree_sdk2_python: 实物部署硬件通信接口。
+- [legged_gym_go2](https://github.com/littlebearqqq/legged_gym_go2.git): 构建训练与运行代码的基础。
+- [rsl_rl](https://github.com/leggedrobotics/rsl_rl.git): 强化学习算法实现。
+- [mujoco](https://github.com/google-deepmind/mujoco.git): 提供强大仿真功能。
+- [unitree_sdk2_python](https://github.com/unitreerobotics/unitree_sdk2_python.git): 实物部署硬件通信接口。
 
