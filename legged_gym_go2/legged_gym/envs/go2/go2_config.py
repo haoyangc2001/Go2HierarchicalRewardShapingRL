@@ -213,7 +213,7 @@ class GO2HighLevelCfgPPO(LeggedRobotCfgPPO):
         resume = True
         resume_path = "/home/wutr/IsaacGym/logs/high_level_go2/20251125-141002/model_1300.pt"  # 你的checkpoint路径
         # 底层策略模型路径
-        low_level_model_path = "/home/wutr/IsaacGym/legged_gym_go2/logs/rough_go2/Sep08_11-57-26_/model_18500.pt"
+        low_level_model_path = "logs/rough_go2/Sep08_11-57-26_/model_18500.pt"
 
 _base_high_level_obs = 8
 _target_dim = GO2HighLevelCfg.target_lidar_num_bins
