@@ -1,5 +1,4 @@
 LICENSE
-README.md
 setup.py
 legged_gym/__init__.py
 legged_gym/envs/__init__.py
