@@ -9,4 +9,10 @@ __pycache__/
 # 系统文件（Mac） 
 .DS_Store 
 # 系统文件（Windows） 
-Thumbs.db
+Thumbs.db 
+legged_gym_go2/legged_gym/scripts/logs/high_level_go2/
+logs/high_level_go2/
+.vscode/launch.json
+AGENTS.md
+CLAUDE.md
+change-list.txt
