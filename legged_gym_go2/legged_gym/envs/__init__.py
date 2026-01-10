@@ -9,6 +9,8 @@ from legged_gym.envs.h1_2.h1_2_config import H1_2RoughCfg, H1_2RoughCfgPPO
 from legged_gym.envs.h1_2.h1_2_env import H1_2Robot
 from legged_gym.envs.g1.g1_config import G1RoughCfg, G1RoughCfgPPO
 from legged_gym.envs.g1.g1_env import G1Robot
+from legged_gym.envs.go2.hierarchical_go2_env import HierarchicalGO2Env
+
 
 
 

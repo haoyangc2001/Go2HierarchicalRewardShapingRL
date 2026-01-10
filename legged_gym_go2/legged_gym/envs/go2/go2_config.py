@@ -208,12 +208,12 @@ class GO2HighLevelCfgPPO(LeggedRobotCfgPPO):
         run_name = ''
         experiment_name = 'high_level_go2'
         max_iterations = 1500
-        save_interval = 10
+        save_interval = 100
         # gh_dump_interval = 50  # iteration interval for dumping g/h tensors
-        resume = True
-        resume_path = "/home/wutr/IsaacGym/logs/high_level_go2/20251125-141002/model_1300.pt"  # 你的checkpoint路径
+        resume = False
+        resume_path = "/home/caohy/repositories/MCRA_RL/legged_gym_go2/legged_gym/scripts/logs/high_level_go2/20260105-102613/model_1300.pt"  # 你的checkpoint路径
         # 底层策略模型路径
-        low_level_model_path = "logs/rough_go2/Sep08_11-57-26_/model_18500.pt"
+        low_level_model_path = "/home/caohy/repositories/MCRA_RL/legged_gym_go2/logs/rough_go2/Sep08_11-57-26_/model_18500.pt"
 
 _base_high_level_obs = 8
 _target_dim = GO2HighLevelCfg.target_lidar_num_bins
