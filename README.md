@@ -149,6 +149,15 @@ Reach-Avoid 强化学习算法是专为避障导航任务设计的 PPO（Proxima
    - 标准 PPO：基于奖励的策略更新
    - ReachAvoidPPO：考虑双重目标的策略更新
 
+### 🧠 3. Reward-Shaping PPO 高层导航算法
+
+Reward-Shaping PPO 使用密集奖励引导导航策略学习，同时保留到达/碰撞的终止奖励：
+- **密集奖励**：目标方向投影、角度误差惩罚、避障惩罚、目标进度奖励
+- **终止奖励**：到达奖励 / 碰撞惩罚 / 超时惩罚
+- **动作一致性**：奖励使用执行中的速度命令（`base_env.commands`）
+
+详细算法与公式说明见：`RewardShapingPPODesign.md`
+
 ### 🌍 3. 环境与仿真
 
 - 基于 Isaac Gym 物理引擎的高性能仿真环境
@@ -332,6 +341,14 @@ Reach-Avoid 强化学习算法是专为避障导航任务设计的 PPO（Proxima
   - `--resume`：是否从 checkpoint 恢复训练
   - `--experiment_name`：实验名称
   - `--num_envs`：并行训练环境数量
+
+##### `train_reward_shaping.py`
+- **功能**：使用 reward-shaping PPO 训练高层导航策略
+- **算法**：Reward-Shaping PPO（密集奖励 + 终止奖励）
+- **使用命令**：
+  ```bash
+  python legged_gym_go2/legged_gym/scripts/train_reward_shaping.py
+  ```
 
 #### 2. 可视化与测试脚本
 

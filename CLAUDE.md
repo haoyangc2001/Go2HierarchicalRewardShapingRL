@@ -29,7 +29,7 @@ MCRA_RL is a hierarchical reinforcement learning system for Unitree Go2 quadrupe
 
 ## Algorithm Design
 
-Detailed Reach-Avoid PPO design (value targets, losses, entropy regularization) is documented in `REACH_AVOID_PPO_DESIGN.md` and should be kept in sync with this section.
+Detailed Reach-Avoid PPO design (value targets, losses, entropy regularization) is documented in this section and should be kept in sync with the implementation.
 
 ### 1. Reach-Avoid Problem Formulation
 The Reach-Avoid task requires the agent to reach a target region while avoiding obstacles:
@@ -87,7 +87,7 @@ Q_t = \max\left( h_t, \min\left( g_t, \gamma \cdot V_{t+1} \right) \right)
    - **Safety-first principle**: When \( h_t \geq 0 \) (safety violation), \( Q_t = h_t \geq 0 \)
    - Ensures value function reflects safety constraint priority
 
-**Implementation note**: The code forms multiple \(Q_t^{(k)}\) candidates via a value table and computes the value target \(\hat{Q}_t\) as a GAE-weighted average; advantages use \(A_t=\hat{Q}_t-V_t\). See `REACH_AVOID_PPO_DESIGN.md` for the full target and loss definitions.
+**Implementation note**: The code forms multiple \(Q_t^{(k)}\) candidates via a value table and computes the value target \(\hat{Q}_t\) as a GAE-weighted average; advantages use \(A_t=\hat{Q}_t-V_t\). See the Reach-Avoid PPO section below for the full target and loss definitions.
 
 #### 2.3 Generalized Advantage Estimation (GAE) Extension
 **Reach-Avoid GAE formula** (`_calculate_reach_gae` function):
