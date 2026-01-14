@@ -30,6 +30,14 @@ class HierarchicalGO2Env:
 
         # Create the underlying GO2 environment
         self.base_env = self._create_base_env()
+        if hasattr(self.base_env.cfg, "rewards_ext"):
+            terminate_on_reach_avoid = True
+            if hasattr(self.cfg, "reward_shaping"):
+                terminate_on_reach_avoid = bool(
+                    getattr(self.cfg.reward_shaping, "terminate_on_safety_violation", True)
+                    or getattr(self.cfg.reward_shaping, "terminate_on_success", True)
+                )
+            setattr(self.base_env.cfg.rewards_ext, "terminate_on_reach_avoid", terminate_on_reach_avoid)
 
         # Load the low-level locomotion policy
         self.low_level_policy = self._load_low_level_policy()

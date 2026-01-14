@@ -2,7 +2,8 @@ from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobot
 
 class GO2RoughCfg( LeggedRobotCfg ):
     class env:
-        num_envs = 4096
+        # num_envs = 4096
+        num_envs = 2048
         # num_envs = 2
         num_observations = 45
         num_privileged_obs = None # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise
@@ -69,11 +70,15 @@ class GO2RoughCfg( LeggedRobotCfg ):
 
         # 目标位置 (保持在原点附近)
         target_sphere_pos = [0.0, 0.0, 0.4]    # [m]
-        target_sphere_radius = 0.5             # 原: 0.3m × 3.33 ≈ 1.0m
+        target_sphere_radius = 0.3             # 目标判定半径（参考环境为0.3m）
 
         # # 兼容性: 保留单个障碍物配置 (使用第一个障碍物)
         # unsafe_sphere_pos = [-2.66, -3.66, 0.4]
         unsafe_radius_h_eval_scale = 2.0  # 扩大判定半径来计算安全指标h(x)
+        unsafe_radius_reward_scale = 1.0  # 奖励 shaping 使用的半径缩放
+        goal_reached_dist = 0.3
+        collision_dist = 0.35
+        terminate_on_reach_avoid = False
 
     class terrain(LeggedRobotCfg.terrain ):
         #使用平地而非三维地形
@@ -189,6 +194,23 @@ class GO2HighLevelCfg(GO2RoughCfg):
     target_lidar_num_bins = 16
     target_lidar_max_range = 8.0
 
+    class reward_shaping:
+        # Reward shaping parameters aligned with the reference environment.
+        goal_reached_dist = 0.3
+        collision_dist = 0.35
+        obstacle_avoid_dist = 1.0
+        forward_reward_scale = 0.5
+        yaw_penalty_scale = 0.2
+        obstacle_penalty_scale = 0.25
+        goal_progress_scale = 5.0
+        success_reward = 120.0
+        collision_penalty = 120.0
+        timeout_penalty = 0.0
+        reward_scale = 1.0
+        reward_clip = 200.0
+        terminate_on_safety_violation = True
+        terminate_on_success = True
+
     class env(GO2RoughCfg.env):
         num_observations = 7  # placeholder; overwritten below
         num_actions = 3       # [vx, vy, vyaw]
@@ -197,17 +219,25 @@ class GO2HighLevelCfg(GO2RoughCfg):
 class GO2HighLevelCfgPPO(LeggedRobotCfgPPO):
     """高层导航策略PPO配置"""
 
+    class policy(LeggedRobotCfgPPO.policy):
+        init_noise_std = 0.3
+
     class algorithm(LeggedRobotCfgPPO.algorithm):
-        entropy_coef = 0.01
-        learning_rate = 1e-3
-        num_learning_epochs = 10
-        num_mini_batches = 8
+        entropy_coef = 0.001
+        learning_rate = 5e-5  # smaller step for stability under sparse terminal rewards
+        clip_param = 0.05
+        value_loss_coef = 0.5
+        schedule = 'fixed'
+        desired_kl = 0.005
+        num_learning_epochs = 3
+        num_mini_batches = 4
         num_steps_per_env = 200 # increase horizon to give more time to reach the goal
+        max_grad_norm = 0.5
 
     class runner(LeggedRobotCfgPPO.runner):
         run_name = ''
         experiment_name = 'high_level_go2'
-        max_iterations = 1500
+        max_iterations = 3000
         save_interval = 100
         # gh_dump_interval = 50  # iteration interval for dumping g/h tensors
         resume = False

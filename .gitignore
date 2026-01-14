@@ -10,7 +10,12 @@ __pycache__/
 .DS_Store 
 # 系统文件（Windows） 
 Thumbs.db 
-legged_gym_go2/legged_gym/scripts/logs/high_level_go2/
-logs/high_level_go2/
+
+# Logs and checkpoints
+logs/
+legged_gym_go2/logs/
+legged_gym_go2/legged_gym/scripts/logs/
+*.pt
+
 .vscode/launch.json
 change-list.txt

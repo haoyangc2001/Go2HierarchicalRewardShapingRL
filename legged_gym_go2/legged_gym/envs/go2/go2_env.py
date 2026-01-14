@@ -22,11 +22,26 @@ class GO2Robot(LeggedRobot):
         # Call the parent class's step method to get the standard outputs
         obs, privileged_obs, rews, dones, infos = super().step(actions)
 
-        # Compute our custom safety metrics
-        self._compute_safety_metrics()
-
         # Return the original values plus the new metrics
         return obs, privileged_obs, rews, dones, infos, self.avoid_metric, self.reach_metric
+
+    def check_termination(self):
+        """Extend termination conditions with safety violations and goal reaching."""
+        super().check_termination()
+        self._compute_safety_metrics()
+
+        if getattr(self.cfg.rewards_ext, "terminate_on_reach_avoid", False):
+            collision_dist = getattr(self.cfg.rewards_ext, "collision_dist", None)
+            if collision_dist is not None:
+                # Align termination with reward collision logic.
+                safety_violation = self.min_hazard_distance < collision_dist
+            else:
+                safety_violation = self.avoid_metric > 0.0
+            goal_reached_dist = getattr(
+                self.cfg.rewards_ext, "goal_reached_dist", self.cfg.rewards_ext.target_sphere_radius
+            )
+            reached = self.reach_metric <= goal_reached_dist
+            self.reset_buf |= safety_violation | reached
 
     def compute_observations(self):
         """ Computes observations  
@@ -49,6 +64,8 @@ class GO2Robot(LeggedRobot):
         # Initialize buffers for our custom safety metrics
         self.avoid_metric = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.reach_metric = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        # Tracks distance to the nearest hazard surface (obstacle/boundary) for reward shaping.
+        self.min_hazard_distance = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         # get rigid body states
         rigid_body_state_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
         self.rigid_body_states = gymtorch.wrap_tensor(rigid_body_state_tensor).view(self.num_envs, -1, 13)
@@ -262,13 +279,18 @@ class GO2Robot(LeggedRobot):
             unsafe_pos = unsafe_pos_base.unsqueeze(0) + self.env_origins  # [num_envs, 3]
             dist_to_unsafe = torch.norm(self.base_pos - unsafe_pos, dim=1)
 
-        # The 'avoid' metric is a cost that is > 0 inside the sphere
+        # The 'avoid' metric is a cost that is > 0 inside the sphere.
         avoid_metric = torch.clamp(effective_radius - dist_to_unsafe, min=0.)
+        # Compute distance to the obstacle surface for reward shaping (can be negative if inside).
+        reward_radius_scale = getattr(self.cfg.rewards_ext, "unsafe_radius_reward_scale", 1.0)
+        reward_radius = self.cfg.rewards_ext.unsafe_sphere_radius * reward_radius_scale
+        obstacle_surface_distance = dist_to_unsafe - reward_radius
 
         terrain_length = getattr(self.cfg.terrain, "terrain_length", 6.0)
         terrain_width = getattr(self.cfg.terrain, "terrain_width", 6.0)
         half_length = max(terrain_length * 0.5, 0.0)
         half_width = max(terrain_width * 0.5, 0.0)
+        boundary_distance = None
         if half_length > 0.0 and half_width > 0.0:
             rel_pos_xy = self.base_pos[:, :2] - self.env_origins[:, :2]
             gap_x = half_length - torch.abs(rel_pos_xy[:, 0])
@@ -280,6 +302,12 @@ class GO2Robot(LeggedRobot):
             outside = boundary_distance < 0.0
             if outside.any():
                 self.reset_buf[outside] = 1
+
+        # Use the nearest hazard (obstacle surface or boundary) for reward shaping.
+        if boundary_distance is not None:
+            self.min_hazard_distance = torch.minimum(obstacle_surface_distance, boundary_distance)
+        else:
+            self.min_hazard_distance = obstacle_surface_distance
 
         # Reach metric: distance to the target sphere center (only x,y plane)
         target_pos_base = torch.tensor(self.cfg.rewards_ext.target_sphere_pos, device=self.device, dtype=torch.float)

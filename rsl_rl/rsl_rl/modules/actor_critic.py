@@ -44,6 +44,7 @@ class ActorCritic(nn.Module):
                         critic_hidden_dims=[256, 256, 256],
                         activation='elu',
                         init_noise_std=1.0,
+                        action_squash=None,
                         **kwargs):
         if kwargs:
             print("ActorCritic.__init__ got unexpected arguments, which will be ignored: " + str([key for key in kwargs.keys()]))
@@ -84,6 +85,8 @@ class ActorCritic(nn.Module):
         # Action noise
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.distribution = None
+        self.action_squash = action_squash
+        self._squash_eps = 1e-6
         # disable args validation for speedup
         Normal.set_default_validate_args = False
         
@@ -106,7 +109,10 @@ class ActorCritic(nn.Module):
     
     @property
     def action_mean(self):
-        return self.distribution.mean
+        mean = self.distribution.mean
+        if self.action_squash == "tanh":
+            return torch.tanh(mean)
+        return mean
 
     @property
     def action_std(self):
@@ -122,13 +128,24 @@ class ActorCritic(nn.Module):
 
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
-        return self.distribution.sample()
+        actions = self.distribution.sample()
+        if self.action_squash == "tanh":
+            return torch.tanh(actions)
+        return actions
     
     def get_actions_log_prob(self, actions):
+        if self.action_squash == "tanh":
+            clipped_actions = torch.clamp(actions, -1.0 + self._squash_eps, 1.0 - self._squash_eps)
+            raw_actions = 0.5 * (torch.log1p(clipped_actions) - torch.log1p(-clipped_actions))
+            log_prob = self.distribution.log_prob(raw_actions)
+            log_prob = log_prob - torch.log(1.0 - clipped_actions.pow(2) + self._squash_eps)
+            return log_prob.sum(dim=-1)
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def act_inference(self, observations):
         actions_mean = self.actor(observations)
+        if self.action_squash == "tanh":
+            return torch.tanh(actions_mean)
         return actions_mean
 
     def evaluate(self, critic_observations, **kwargs):
