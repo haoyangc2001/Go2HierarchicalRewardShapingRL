@@ -94,7 +94,10 @@ class PPO:
         self.transition.actions = self.actor_critic.act(obs).detach()
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
         self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
-        self.transition.action_mean = self.actor_critic.action_mean.detach()
+        if hasattr(self.actor_critic, "action_mean_raw"):
+            self.transition.action_mean = self.actor_critic.action_mean_raw.detach()
+        else:
+            self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
@@ -133,6 +136,13 @@ class PPO:
         mean_surrogate_loss = 0
         mean_approx_kl = 0
         mean_clip_fraction = 0
+        mean_entropy = 0
+        mean_ratio = 0
+        mean_approx_kl_raw = 0
+        mean_value_clip_frac = 0
+        mean_grad_norm = 0
+        max_ratio = 0
+        max_logp_diff_raw = 0
         updates_count = 0
         stop_update = False
         if self.actor_critic.is_recurrent:
@@ -144,7 +154,10 @@ class PPO:
             self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
             actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
             value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
-            mu_batch = self.actor_critic.action_mean
+            if hasattr(self.actor_critic, "action_mean_raw"):
+                mu_batch = self.actor_critic.action_mean_raw
+            else:
+                mu_batch = self.actor_critic.action_mean
             sigma_batch = self.actor_critic.action_std
             entropy_batch = self.actor_critic.entropy
 
@@ -164,8 +177,8 @@ class PPO:
                         param_group['lr'] = self.learning_rate
 
             # Surrogate loss
-            logp_diff = actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch)
-            logp_diff = torch.clamp(logp_diff, -20.0, 20.0)
+            logp_diff_raw = actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch)
+            logp_diff = torch.clamp(logp_diff_raw, -20.0, 20.0)
             ratio = torch.exp(logp_diff)
             surrogate = -torch.squeeze(advantages_batch) * ratio
             surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param,
@@ -173,6 +186,7 @@ class PPO:
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
             clip_fraction = torch.mean((torch.abs(ratio - 1.0) > self.clip_param).float())
             approx_kl = 0.5 * torch.mean(logp_diff.pow(2))
+            approx_kl_raw = 0.5 * torch.mean(logp_diff_raw.pow(2))
 
             # Value function loss
             if self.use_clipped_value_loss:
@@ -181,21 +195,32 @@ class PPO:
                 value_losses = (value_batch - returns_batch).pow(2)
                 value_losses_clipped = (value_clipped - returns_batch).pow(2)
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()
+                value_clip_frac = torch.mean(
+                    (torch.abs(value_batch - target_values_batch) > self.clip_param).float()
+                )
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
+                value_clip_frac = torch.zeros(1, device=self.device)
 
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
             # Gradient step
             self.optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            grad_norm = nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.optimizer.step()
 
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
             mean_approx_kl += approx_kl.item()
             mean_clip_fraction += clip_fraction.item()
+            mean_entropy += entropy_batch.mean().item()
+            mean_ratio += ratio.mean().item()
+            mean_approx_kl_raw += approx_kl_raw.item()
+            mean_value_clip_frac += value_clip_frac.item()
+            mean_grad_norm += float(grad_norm)
+            max_ratio = max(max_ratio, ratio.max().item())
+            max_logp_diff_raw = max(max_logp_diff_raw, logp_diff_raw.abs().max().item())
             updates_count += 1
 
             if self.desired_kl is not None and approx_kl.item() > self.desired_kl * 2.0:
@@ -209,6 +234,24 @@ class PPO:
         mean_surrogate_loss /= num_updates
         mean_approx_kl /= num_updates
         mean_clip_fraction /= num_updates
+        mean_entropy /= num_updates
+        mean_ratio /= num_updates
+        mean_approx_kl_raw /= num_updates
+        mean_value_clip_frac /= num_updates
+        mean_grad_norm /= num_updates
         self.storage.clear()
+
+        self.last_stats = {
+            "approx_kl_raw": mean_approx_kl_raw,
+            "ratio_mean": mean_ratio,
+            "ratio_max": max_ratio,
+            "logp_diff_raw_max": max_logp_diff_raw,
+            "entropy": mean_entropy,
+            "grad_norm": mean_grad_norm,
+            "value_clip_frac": mean_value_clip_frac,
+            "update_steps": updates_count,
+            "early_stop": stop_update,
+            "lr": self.optimizer.param_groups[0]["lr"],
+        }
 
         return mean_value_loss, mean_surrogate_loss, mean_approx_kl, mean_clip_fraction

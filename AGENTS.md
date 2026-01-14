@@ -16,6 +16,36 @@ MCRA_RL is a hierarchical reinforcement learning system for Unitree Go2 navigati
 - Hierarchical wrapper: `legged_gym_go2/legged_gym/envs/go2/hierarchical_go2_env.py`
 - High-level actions are repeated at low level via `GO2HighLevelCfg.env.high_level_action_repeat`.
 
+## Environment Overview
+### Low-Level Environment (Locomotion)
+- Implements `GO2Robot` by extending `LeggedRobot`, with safety metrics injected into `step()` outputs.
+- `reset()` calls `reset_idx` then performs a zero-action `step` to prime observations.
+- `_compute_safety_metrics()` computes:
+  - `avoid_metric`: positive inside unsafe regions.
+  - `reach_metric`: XY distance to target center.
+  - `min_hazard_distance`: nearest hazard surface distance (min of obstacle surface distance and boundary distance).
+- `check_termination()` augments termination with reach/avoid checks when `terminate_on_reach_avoid` is enabled; collision prefers `min_hazard_distance < collision_dist`.
+
+### High-Level Navigation Wrapper
+- Builds high-level observations from low-level state:
+  - Base 8 dims: `cos(heading)`, `sin(heading)`, `body_vx`, `body_vy`, `yaw_rate`, normalized `dist_to_target`, `target_dir_body_x`, `target_dir_body_y`.
+  - Optional target lidar bins (smooth angular binning with distance decay).
+  - Optional obstacle/boundary lidar bins (max intensity per bin, boundary handled via ray intersections).
+- Maps high-level actions to low-level velocity commands in `update_velocity_commands` with fixed scaling and ranges.
+
+### Hierarchical Wrapper
+- Loads a fixed low-level policy via `OnPolicyRunner` and exposes a high-level interface.
+- Each high-level action is repeated for `high_level_action_repeat` low-level steps; dones are aggregated.
+- High-level observations and g/h values are computed after the low-level rollouts.
+
+### Vectorized Adapter
+- `HierarchicalVecEnv` provides a vectorized API for PPO training while delegating to the hierarchical environment.
+
+### Environment Configuration
+- Low-level base config: `GO2RoughCfg` (terrain, domain randomization, rewards, obstacle/target layout).
+- High-level config: `GO2HighLevelCfg` (lidar, action repeat, observation dimension).
+- Observation dimension is computed as `8 + target_lidar_num_bins + lidar_num_bins`.
+
 ### High-Level Action Mapping (Do Not Change)
 In `update_velocity_commands`:
 - Clip high-level actions to `[-1, 1]`.
@@ -71,7 +101,59 @@ With default `action_scale = [1, 1, 1]`, the effective command ranges are:
 - The training log file is `training.log`.
 - Logged metrics include: `success`, `reach`, `collision`, `timeout`, `cost`, `avg_reward`, `proj`,
   `angle`, `progress`, `obstacle`, `goal_dist`, `min_hazard`, `cmd_speed`, `action_sat`,
-  `action_std`, `policy_loss`, `value_loss`, `approx_kl`, `clip_frac`, `elapsed`.
+  `action_std`, `policy_loss`, `value_loss`, `approx_kl`, `clip_frac`, `elapsed`,
+  plus PPO/diagnostic metrics such as `entropy`, `lr`, `ratio_mean`, `ratio_max`,
+  `logp_diff_max`, `approx_kl_raw`, `grad_norm`, `value_clip_frac`, `Vmean`, `Vstd`,
+  `Rmean`, `Rstd`, `adv_mean`, `adv_std`, `reward_clip`, `hazard_p10`, `hazard_p50`,
+  `hazard_p90`, `boundary_violation`, `boundary_collision`, `obstacle_collision`,
+  `ep_len_mean`, `ep_len_std`, `init_goal_dist`.
+
+### Training Log Field Meanings
+- `iter`: 迭代编号（一次 rollout + 一次 PPO 更新为一轮），从 1 开始计数。
+- `success`: 成功率，按本迭代内结束的 episode 统计；成功定义为到达目标且该 episode 内未发生碰撞。
+- `reach`: 到达率，按结束的 episode 统计，满足 `reach_metric <= goal_reached_dist`。
+- `collision`: 碰撞率，按结束的 episode 统计，满足 `min_hazard_distance < collision_dist`。
+- `timeout`: 超时率，按结束的 episode 统计，仅 `time_outs` 且非到达/碰撞。
+- `cost`: 成功 episode 的平均高层步数成本（不是秒），越低代表越快到达。
+- `avg_reward`: 该迭代每步平均 shaped reward（含终止奖励与缩放/裁剪）。
+- `proj`: 目标方向投影均值 `dot(v_cmd_xy, target_dir_body)`，越大代表朝目标方向运动越强。
+- `angle`: 命令方向与目标方向夹角均值（弧度），速度接近 0 时会被屏蔽。
+- `progress`: 平均目标距离进度 `prev_goal_dist - reach_metric`，终止/截断步置 0。
+- `obstacle`: 避障惩罚项 `r3(min_hazard_distance)` 均值（0~1，越大越接近障碍）。
+- `goal_dist`: 平均目标距离 `reach_metric`（XY 平面距离，单位米）。
+- `min_hazard`: 平均最近危险距离（障碍表面距离与边界距离的最小值，可能为负表示进入危险/越界）。
+- `cmd_speed`: 平均平面速度命令 `||v_cmd_xy||`（单位同底层命令，通常 m/s）。
+- `action_sat`: 动作饱和比例，统计 `|a| > 0.95` 的比例（tanh 输出接近边界）。
+- `action_std`: 策略分布 std 的均值（探索强度指标）。
+- `policy_loss`: PPO 策略损失的迭代均值。
+- `value_loss`: PPO 价值损失的迭代均值。
+- `approx_kl`: 近似 KL（由 log-prob 差分计算的均值）。
+- `clip_frac`: PPO ratio 被裁剪的样本占比。
+- `entropy`: 策略分布熵均值（探索强度的直接指标）。
+- `lr`: 当前 PPO 学习率（自适应调度时会动态变化）。
+- `ratio_mean`: `ratio=exp(logp_diff)` 的均值（更新强度指示）。
+- `ratio_max`: `ratio` 的最大值（是否存在极端更新）。
+- `logp_diff_max`: 未裁剪 `logp_diff` 的绝对值最大值（爆炸预警）。
+- `approx_kl_raw`: 基于未裁剪 `logp_diff` 的 KL 估计。
+- `grad_norm`: 梯度范数均值（爆炸或过小都可见）。
+- `value_clip_frac`: 价值函数更新中被 clip 的样本占比。
+- `Vmean`: 价值函数输出均值。
+- `Vstd`: 价值函数输出标准差。
+- `Rmean`: 回报（return）均值。
+- `Rstd`: 回报（return）标准差。
+- `adv_mean`: 未归一化优势均值（return - value）。
+- `adv_std`: 未归一化优势标准差。
+- `reward_clip`: reward 被裁剪的平均比例。
+- `hazard_p10`: `min_hazard_distance` 的 10% 分位数。
+- `hazard_p50`: `min_hazard_distance` 的 50% 分位数（中位数）。
+- `hazard_p90`: `min_hazard_distance` 的 90% 分位数。
+- `boundary_violation`: 越界比例（boundary_distance < 0）。
+- `boundary_collision`: 每步发生边界碰撞的平均比例（基于最近危险源判定）。
+- `obstacle_collision`: 每步发生障碍物碰撞的平均比例（基于最近危险源判定）。
+- `ep_len_mean`: 本迭代内完成的 episode 平均步数。
+- `ep_len_std`: episode 步数标准差。
+- `init_goal_dist`: 每次迭代开始时的目标初始距离均值。
+- `elapsed`: 本次日志与上一次日志的间隔时间（秒）。
 
 ## Configuration Entry Points
 - Reward shaping parameters: `legged_gym_go2/legged_gym/envs/go2/go2_config.py` (`GO2HighLevelCfg.reward_shaping`)

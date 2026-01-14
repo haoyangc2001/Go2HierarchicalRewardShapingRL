@@ -14,7 +14,6 @@ Example:
 
 import os
 import sys
-import re
 import argparse
 
 from pathlib import Path
@@ -51,11 +50,18 @@ def parse_log_file(log_file_path):
         'elapsed': []
     }
 
-    # Regular expression pattern to match log lines
-    # Example: "iter 00001 | success 0.014 | cost 50.0 | policy_loss 0.00157 | value_loss 9107.46283 | Vmean -0.046 | Rmean 61.555 | Vrmse 135.045 | VexpVar -0.000 | adv_std 120.177 | elapsed 50.19s"
-    pattern = re.compile(
-        r'iter\s+(\d+)\s+\|\s+success\s+([\d\.\-]+)\s+\|\s+cost\s+([\d\.\-]+)\s+\|\s+policy_loss\s+([\d\.\-]+)\s+\|\s+value_loss\s+([\d\.\-]+)\s+\|\s+Vmean\s+([\d\.\-]+)\s+\|\s+Rmean\s+([\d\.\-]+)\s+\|\s+Vrmse\s+([\d\.\-]+)\s+\|\s+VexpVar\s+([\d\.\-]+)\s+\|\s+adv_std\s+([\d\.\-]+)\s+\|\s+elapsed\s+([\d\.\-]+)s'
-    )
+    expected_keys = [
+        'success',
+        'cost',
+        'policy_loss',
+        'value_loss',
+        'Vmean',
+        'Rmean',
+        'Vrmse',
+        'VexpVar',
+        'adv_std',
+        'elapsed',
+    ]
 
     line_count = 0
     parsed_count = 0
@@ -69,61 +75,42 @@ def parse_log_file(log_file_path):
 
                 line_count += 1
 
-                # Try to match the pattern
-                match = pattern.match(line)
-                if match:
-                    parsed_count += 1
+                if not line.startswith("iter "):
+                    continue
 
-                    # Extract all captured groups
-                    groups = match.groups()
+                parts = [p.strip() for p in line.split("|")]
+                if not parts:
+                    continue
 
-                    # Convert to appropriate data types
-                    iteration = int(groups[0])
-                    success = float(groups[1])
-                    cost = float(groups[2])
-                    policy_loss = float(groups[3])
-                    value_loss = float(groups[4])
-                    Vmean = float(groups[5])
-                    Rmean = float(groups[6])
-                    Vrmse = float(groups[7])
-                    VexpVar = float(groups[8])
-                    adv_std = float(groups[9])
-                    elapsed = float(groups[10])
+                iter_tokens = parts[0].split()
+                if len(iter_tokens) < 2:
+                    continue
 
-                    # Store in data dictionary
-                    data['iterations'].append(iteration)
-                    data['success'].append(success)
-                    data['cost'].append(cost)
-                    data['policy_loss'].append(policy_loss)
-                    data['value_loss'].append(value_loss)
-                    data['Vmean'].append(Vmean)
-                    data['Rmean'].append(Rmean)
-                    data['Vrmse'].append(Vrmse)
-                    data['VexpVar'].append(VexpVar)
-                    data['adv_std'].append(adv_std)
-                    data['elapsed'].append(elapsed)
-                else:
-                    # Try simpler pattern for malformed lines
-                    simple_pattern = re.compile(r'iter\s+(\d+)\s+\|\s+success\s+([\d\.\-]+)')
-                    simple_match = simple_pattern.search(line)
-                    if simple_match:
-                        parsed_count += 1
-                        iteration = int(simple_match.group(1))
-                        success = float(simple_match.group(2))
-                        data['iterations'].append(iteration)
-                        data['success'].append(success)
-                        # Fill other fields with NaN
-                        data['cost'].append(np.nan)
-                        data['policy_loss'].append(np.nan)
-                        data['value_loss'].append(np.nan)
-                        data['Vmean'].append(np.nan)
-                        data['Rmean'].append(np.nan)
-                        data['Vrmse'].append(np.nan)
-                        data['VexpVar'].append(np.nan)
-                        data['adv_std'].append(np.nan)
-                        data['elapsed'].append(np.nan)
-                    else:
-                        print(f"Warning: Could not parse line {line_num}: {line[:80]}...")
+                try:
+                    iteration = int(iter_tokens[1])
+                except ValueError:
+                    continue
+
+                metrics = {}
+                for part in parts[1:]:
+                    if not part:
+                        continue
+                    key_value = part.split(" ", 1)
+                    if len(key_value) != 2:
+                        continue
+                    key, value = key_value
+                    value = value.strip()
+                    if key == "elapsed":
+                        value = value.rstrip("s")
+                    try:
+                        metrics[key] = float(value)
+                    except ValueError:
+                        continue
+
+                parsed_count += 1
+                data['iterations'].append(iteration)
+                for key in expected_keys:
+                    data[key].append(metrics.get(key, np.nan))
 
         print(f"Parsed {parsed_count} out of {line_count} lines successfully")
 

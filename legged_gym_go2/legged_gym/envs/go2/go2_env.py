@@ -66,6 +66,9 @@ class GO2Robot(LeggedRobot):
         self.reach_metric = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         # Tracks distance to the nearest hazard surface (obstacle/boundary) for reward shaping.
         self.min_hazard_distance = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        # Tracks obstacle and boundary distances separately for diagnostics.
+        self.obstacle_surface_distance = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.boundary_distance = torch.full((self.num_envs,), float("inf"), device=self.device, dtype=torch.float)
         # get rigid body states
         rigid_body_state_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
         self.rigid_body_states = gymtorch.wrap_tensor(rigid_body_state_tensor).view(self.num_envs, -1, 13)
@@ -290,7 +293,7 @@ class GO2Robot(LeggedRobot):
         terrain_width = getattr(self.cfg.terrain, "terrain_width", 6.0)
         half_length = max(terrain_length * 0.5, 0.0)
         half_width = max(terrain_width * 0.5, 0.0)
-        boundary_distance = None
+        boundary_distance = torch.full((self.num_envs,), float("inf"), device=self.device, dtype=torch.float)
         if half_length > 0.0 and half_width > 0.0:
             rel_pos_xy = self.base_pos[:, :2] - self.env_origins[:, :2]
             gap_x = half_length - torch.abs(rel_pos_xy[:, 0])
@@ -304,10 +307,9 @@ class GO2Robot(LeggedRobot):
                 self.reset_buf[outside] = 1
 
         # Use the nearest hazard (obstacle surface or boundary) for reward shaping.
-        if boundary_distance is not None:
-            self.min_hazard_distance = torch.minimum(obstacle_surface_distance, boundary_distance)
-        else:
-            self.min_hazard_distance = obstacle_surface_distance
+        self.min_hazard_distance = torch.minimum(obstacle_surface_distance, boundary_distance)
+        self.obstacle_surface_distance = obstacle_surface_distance
+        self.boundary_distance = boundary_distance
 
         # Reach metric: distance to the target sphere center (only x,y plane)
         target_pos_base = torch.tensor(self.cfg.rewards_ext.target_sphere_pos, device=self.device, dtype=torch.float)

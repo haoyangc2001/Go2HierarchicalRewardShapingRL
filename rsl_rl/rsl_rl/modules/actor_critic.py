@@ -115,6 +115,11 @@ class ActorCritic(nn.Module):
         return mean
 
     @property
+    def action_mean_raw(self):
+        # Raw Gaussian mean before any squashing; useful for KL computation.
+        return self.distribution.mean
+
+    @property
     def action_std(self):
         return self.distribution.stddev
     
