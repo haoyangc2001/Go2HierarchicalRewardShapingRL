@@ -225,10 +225,13 @@ class GO2HighLevelCfgPPO(LeggedRobotCfgPPO):
     class algorithm(LeggedRobotCfgPPO.algorithm):
         entropy_coef = 0.001
         learning_rate = 2e-5  # smaller step for stability under sparse terminal rewards
-        clip_param = 0.05
+        clip_param = 0.1
+        value_clip_param = 0.2
         value_loss_coef = 0.5
         schedule = 'adaptive'
-        desired_kl = 0.005
+        desired_kl = 0.02
+        min_lr = 1e-6
+        max_lr = 2e-4
         num_learning_epochs = 3
         num_mini_batches = 4
         num_steps_per_env = 200 # increase horizon to give more time to reach the goal

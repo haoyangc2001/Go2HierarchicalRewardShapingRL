@@ -14,7 +14,7 @@ from legged_gym.utils.hierarchical_env_utils import (
     create_env,
 )
 from legged_gym.utils import get_args
-from legged_gym.utils.helpers import update_cfg_from_args
+from legged_gym.utils.helpers import class_to_dict, update_cfg_from_args
 from rsl_rl.algorithms.ppo import PPO
 from rsl_rl.modules import ActorCritic
 
@@ -151,10 +151,32 @@ def train_reward_shaping(args) -> None:
         action_squash="tanh",
     ).to(device)
 
+    algo_cfg = class_to_dict(train_cfg.algorithm)
+    ppo_kwargs = {
+        key: algo_cfg[key]
+        for key in (
+            "num_learning_epochs",
+            "num_mini_batches",
+            "clip_param",
+            "gamma",
+            "lam",
+            "value_loss_coef",
+            "entropy_coef",
+            "learning_rate",
+            "max_grad_norm",
+            "use_clipped_value_loss",
+            "schedule",
+            "desired_kl",
+            "value_clip_param",
+            "min_lr",
+            "max_lr",
+        )
+        if key in algo_cfg
+    }
     alg = PPO(
         actor_critic=actor_critic,
         device=device,
-        **train_cfg.algorithm.__dict__,
+        **ppo_kwargs,
     )
     alg.init_storage(
         num_envs=env.num_envs,
@@ -485,8 +507,8 @@ def train_reward_shaping(args) -> None:
 if __name__ == "__main__":
     args = get_args()
     args.headless = True
-    args.compute_device_id = 6
-    args.sim_device_id = 6
-    args.rl_device = "cuda:6"
-    args.sim_device = "cuda:6"
+    args.compute_device_id = 2
+    args.sim_device_id = 2
+    args.rl_device = "cuda:2"
+    args.sim_device = "cuda:2"
     train_reward_shaping(args)

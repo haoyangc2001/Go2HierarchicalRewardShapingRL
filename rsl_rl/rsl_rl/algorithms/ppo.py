@@ -51,6 +51,9 @@ class PPO:
                  use_clipped_value_loss=True,
                  schedule="fixed",
                  desired_kl=0.01,
+                 value_clip_param=None,
+                 min_lr=1e-5,
+                 max_lr=1e-3,
                  device='cpu',
                  ):
 
@@ -59,6 +62,8 @@ class PPO:
         self.desired_kl = desired_kl
         self.schedule = schedule
         self.learning_rate = learning_rate
+        self.min_lr = min_lr
+        self.max_lr = max_lr
 
         # PPO components
         self.actor_critic = actor_critic
@@ -77,6 +82,7 @@ class PPO:
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+        self.value_clip_param = clip_param if value_clip_param is None else value_clip_param
 
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
         self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device)
@@ -161,21 +167,6 @@ class PPO:
             sigma_batch = self.actor_critic.action_std
             entropy_batch = self.actor_critic.entropy
 
-            # KL
-            if self.desired_kl != None and self.schedule == 'adaptive':
-                with torch.inference_mode():
-                    kl = torch.sum(
-                        torch.log(sigma_batch / old_sigma_batch + 1.e-5) + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch)) / (2.0 * torch.square(sigma_batch)) - 0.5, axis=-1)
-                    kl_mean = torch.mean(kl)
-
-                    if kl_mean > self.desired_kl * 2.0:
-                        self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-                    elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                        self.learning_rate = min(1e-2, self.learning_rate * 1.5)
-
-                    for param_group in self.optimizer.param_groups:
-                        param_group['lr'] = self.learning_rate
-
             # Surrogate loss
             logp_diff_raw = actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch)
             logp_diff = torch.clamp(logp_diff_raw, -20.0, 20.0)
@@ -190,13 +181,13 @@ class PPO:
 
             # Value function loss
             if self.use_clipped_value_loss:
-                value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(-self.clip_param,
-                                                                                                self.clip_param)
+                value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(-self.value_clip_param,
+                                                                                                self.value_clip_param)
                 value_losses = (value_batch - returns_batch).pow(2)
                 value_losses_clipped = (value_clipped - returns_batch).pow(2)
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()
                 value_clip_frac = torch.mean(
-                    (torch.abs(value_batch - target_values_batch) > self.clip_param).float()
+                    (torch.abs(value_batch - target_values_batch) > self.value_clip_param).float()
                 )
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
@@ -223,12 +214,6 @@ class PPO:
             max_logp_diff_raw = max(max_logp_diff_raw, logp_diff_raw.abs().max().item())
             updates_count += 1
 
-            if self.desired_kl is not None and approx_kl.item() > self.desired_kl * 2.0:
-                stop_update = True
-
-            if stop_update:
-                break
-
         num_updates = max(1, updates_count)
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
@@ -239,6 +224,14 @@ class PPO:
         mean_approx_kl_raw /= num_updates
         mean_value_clip_frac /= num_updates
         mean_grad_norm /= num_updates
+        if self.desired_kl is not None and self.schedule == 'adaptive':
+            if mean_approx_kl_raw > self.desired_kl * 2.0:
+                self.learning_rate = max(self.min_lr, self.learning_rate / 1.5)
+            elif mean_approx_kl_raw < self.desired_kl / 2.0 and mean_approx_kl_raw > 0.0:
+                self.learning_rate = min(self.max_lr, self.learning_rate * 1.5)
+
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = self.learning_rate
         self.storage.clear()
 
         self.last_stats = {

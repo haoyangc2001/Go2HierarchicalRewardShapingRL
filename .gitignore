@@ -12,7 +12,6 @@ __pycache__/
 Thumbs.db 
 
 # Logs and checkpoints
-/logs/high_level_go2_reach_avoid
 /logs/high_level_go2_reward_shaping/
 /logs/logs/high_level_go2_reward_shaping/
 
