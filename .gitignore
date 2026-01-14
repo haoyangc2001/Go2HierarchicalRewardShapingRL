@@ -12,9 +12,9 @@ __pycache__/
 Thumbs.db 
 
 # Logs and checkpoints
-logs/
-legged_gym_go2/logs/
-legged_gym_go2/legged_gym/scripts/logs/
+/logs/high_level_go2/
+/logs/high_level_go2_reward_shaping/
+/logs/logs/high_level_go2_reward_shaping/
 *.pt
 
 .vscode/launch.json

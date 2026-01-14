@@ -1,158 +1,115 @@
 # Repository Guidelines
 
 ## Project Overview
+MCRA_RL is a hierarchical reinforcement learning system for Unitree Go2 navigation. The low-level locomotion policy is fixed and pre-trained, while the high-level policy is trained with reward-shaping PPO to reach a target and avoid obstacles/boundaries.
 
-MCRA_RL is a hierarchical reinforcement learning system for Unitree Go2 quadruped navigation. The current training focus is **reward shaping PPO** for high-level obstacle-avoidance navigation, with a fixed, pre-trained low-level locomotion controller.
+## Key Paths
+- Environments: `legged_gym_go2/legged_gym/envs/go2/`
+- Training scripts: `legged_gym_go2/legged_gym/scripts/`
+- RL algorithms: `rsl_rl/rsl_rl/algorithms/`
+- Deployment: `legged_gym_go2/deploy/`
+- Logs/checkpoints: `/home/caohy/repositories/MCRA_RL/logs/`
 
-## Architecture
+## Hierarchical RL Structure
+- Low-level (locomotion): `legged_gym_go2/legged_gym/envs/go2/go2_env.py`
+- High-level (navigation wrapper): `legged_gym_go2/legged_gym/envs/go2/high_level_navigation_env.py`
+- Hierarchical wrapper: `legged_gym_go2/legged_gym/envs/go2/hierarchical_go2_env.py`
+- High-level actions are repeated at low level via `GO2HighLevelCfg.env.high_level_action_repeat`.
 
-### Hierarchical RL Structure
-- **Low-level**: Pre-trained locomotion policy (velocity → joint actions) in `legged_gym_go2/legged_gym/envs/go2/go2_env.py`
-- **High-level**: Trainable navigation policy (observations → velocity commands) in `legged_gym_go2/legged_gym/envs/go2/high_level_navigation_env.py`
-- **Hierarchical wrapper**: `legged_gym_go2/legged_gym/envs/go2/hierarchical_go2_env.py`
-- **Action repeat**: High-level actions repeated at low-level via `high_level_action_repeat`
-- **Action scaling**: High-level actions are clipped to [-1, 1], scaled by `action_scale`, then mapped to
-  base commands (vx × 0.6, vy × 0.2, vyaw × 0.8) in `update_velocity_commands`.
-- **High-level speed limits**: In `update_velocity_commands` (`legged_gym_go2/legged_gym/envs/go2/high_level_navigation_env.py`),
-  high-level actions are clipped to [-1, 1], multiplied by `HighLevelNavigationConfig.action_scale` (default [1.0, 1.0, 1.0]),
-  then mapped to base commands with fixed multipliers (vx × 0.6, vy × 0.2, vyaw × 0.8). With default scaling, the effective
-  command ranges are vx ∈ [-0.6, 0.6], vy ∈ [-0.2, 0.2], vyaw ∈ [-0.8, 0.8].
-  注意：后续所有改动都不能更改这个高层速度限制相关的内容
+### High-Level Action Mapping (Do Not Change)
+In `update_velocity_commands`:
+- Clip high-level actions to `[-1, 1]`.
+- Multiply by `HighLevelNavigationConfig.action_scale`.
+- Map to base commands:
+  - `vx = action[0] * 0.6`
+  - `vy = action[1] * 0.2`
+  - `vyaw = action[2] * 0.8`
+With default `action_scale = [1, 1, 1]`, the effective command ranges are:
+`vx ∈ [-0.6, 0.6]`, `vy ∈ [-0.2, 0.2]`, `vyaw ∈ [-0.8, 0.8]`.
 
-### Reward Shaping PPO
-- **Training script**: `legged_gym_go2/legged_gym/scripts/train_reward_shaping.py`
-- **RL algorithm**: Standard PPO (`rsl_rl/algorithms/ppo.py`)
-- **Reward design**: Reference-style shaping aligned with Gazebo baseline:
-  - **Success**: +`success_reward` when within `goal_reached_dist`
-  - **Collision**: -`collision_penalty` when within `collision_dist`
-  - **Dense step reward**: `forward_reward_scale * dot(v_cmd_xy, target_dir_body) - yaw_penalty_scale * angle_error - obstacle_penalty_scale * r3(min_laser)`
-    (uses executed velocity commands from `base_env.commands`; `angle_error` is the heading difference between command direction and target direction, masked when command speed is near zero)
-  - **Goal progress**: `goal_progress_scale * (prev_goal_dist - reach_metric)` (not applied on terminated/truncated steps)
-  - **Obstacle penalty**: `r3(min_laser) = max(1 - min_laser / obstacle_avoid_dist, 0)`
-  - **Timeout**: optional `timeout_penalty`
-- **Reward parameters**: `GO2HighLevelCfg.reward_shaping` in `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
+## High-Level Observations
+- Base features (8):
+  1) `cos(heading)`
+  2) `sin(heading)`
+  3) `body_vx` (scaled, clipped)
+  4) `body_vy` (scaled, clipped)
+  5) `yaw_rate` (scaled, clipped)
+  6) `dist_to_target` (normalized)
+  7) `target_dir_body_x`
+  8) `target_dir_body_y`
+- Optional target lidar bins: `target_lidar_num_bins`
+- Optional obstacle/boundary lidar bins: `lidar_num_bins`
+- Total dim: `8 + target_lidar_num_bins + lidar_num_bins` when manual lidar is enabled.
 
-### Algorithm Details
-- **PPO policy loss (clipped)**:
-  - `ratio = exp(logp_new - logp_old)`
-  - `L_clip = mean(max(-A * ratio, -A * clip(ratio, 1-eps, 1+eps)))`
-- **Value loss (clipped)**:
-  - `V_clip = V_old + clip(V - V_old, -eps, +eps)`
-  - `L_v = mean(max((V - R)^2, (V_clip - R)^2))`
-- **Entropy regularization**: `-entropy_coef * entropy`
-- **GAE advantages** (time_out bootstrap supported):
-  - `delta_t = r_t + gamma * (1 - done_t) * V_{t+1} - V_t`
-  - `A_t = delta_t + gamma * lambda * (1 - done_t) * A_{t+1}`
-  - `R_t = A_t + V_t`
-  - Advantages are normalized per rollout.
-- **Termination logic**:
+## Reward Shaping PPO (High Level)
+- Training script: `legged_gym_go2/legged_gym/scripts/train_reward_shaping.py`
+- PPO implementation: `rsl_rl/rsl_rl/algorithms/ppo.py`
+- Reward design:
+  - Success: `+success_reward` when `reach_metric <= goal_reached_dist`
+  - Collision: `-collision_penalty` when `min_hazard_distance < collision_dist`
+  - Dense step reward:
+    - `forward_reward_scale * dot(v_cmd_xy, target_dir_body)`
+    - `- yaw_penalty_scale * angle_error` (masked when `|v_cmd_xy|` is near zero)
+    - `- obstacle_penalty_scale * r3(min_hazard_distance)`
+  - Goal progress: `goal_progress_scale * (prev_goal_dist - reach_metric)` (not applied on terminated/truncated steps)
+  - Timeout: optional `timeout_penalty`
+  - `r3(d) = max(1 - d / obstacle_avoid_dist, 0)`
+- Termination:
   - `collision = min_hazard_distance < collision_dist`
   - `success = reach_metric <= goal_reached_dist`
   - `terminated = collision OR success`
   - `truncated = time_out AND NOT terminated`
   - PPO bootstraps only on `truncated` via `time_outs`.
 
-### Hazard Distance for Reward
-- **Nearest hazard distance** (obstacle surface or boundary) is computed in
-  `legged_gym_go2/legged_gym/envs/go2/go2_env.py` and stored as
-  `self.min_hazard_distance` for reward shaping.
+## Safety Metrics
+- `min_hazard_distance` is computed in `legged_gym_go2/legged_gym/envs/go2/go2_env.py` as the nearest hazard surface distance (min of obstacle surface distance and boundary distance).
+- `avoid_metric` is positive inside unsafe regions; `reach_metric` is XY distance to the target.
 
-### High-Level Observations
-- **Base features (8)**:
-  1. `cos(heading)`
-  2. `sin(heading)`
-  3. `body_vx` (scaled)
-  4. `body_vy` (scaled)
-  5. `yaw_rate` (scaled)
-  6. `dist_to_target` (normalized)
-  7. `target_dir_body_x`
-  8. `target_dir_body_y`
-- **Target lidar bins**: soft target direction encoding (optional)
-- **Obstacle lidar bins**: manual lidar sector encoding (optional)
-- **Total dim**: `8 + target_lidar_num_bins + lidar_num_bins` when manual lidar is enabled.
+## Logging and Outputs
+- Training logs/checkpoints are saved to:
+  `/home/caohy/repositories/MCRA_RL/logs/<experiment_name>/<timestamp>/`
+- The training log file is `training.log`.
+- Logged metrics include: `success`, `reach`, `collision`, `timeout`, `cost`, `avg_reward`, `proj`,
+  `angle`, `progress`, `obstacle`, `goal_dist`, `min_hazard`, `cmd_speed`, `action_sat`,
+  `action_std`, `policy_loss`, `value_loss`, `approx_kl`, `clip_frac`, `elapsed`.
 
-## Key Components
-
-1. **Environments**: `legged_gym_go2/legged_gym/envs/go2/`
-2. **RL Algorithms**: `rsl_rl/algorithms/` (PPO)
-3. **Training Scripts**: `legged_gym_go2/legged_gym/scripts/`
-4. **Deployment**: `legged_gym_go2/deploy/`
-5. **Configuration**: Python config classes in `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
-
-## Training Flow (Reward Shaping)
-
-1. Reset env → get obs and metrics
-2. Rollout horizon steps:
-   - Sample action, step env
-   - Compute reward (success/collision/dense shaping)
-   - Track dones and timeouts
-3. Compute GAE returns and PPO update
-4. Log `success`, `cost`, `avg_reward`, `policy_loss`, `value_loss`
-
-### Logging Metrics
-- `success`: fraction of episodes ended in the rollout that reached target before collision
-- `reach`: fraction of ended episodes that reached the target (regardless of collisions)
-- `collision`: fraction of ended episodes that collided
-- `timeout`: fraction of ended episodes that ended by timeout
-- `cost`: average high-level steps to reach target (successful episodes only)
-- `avg_reward`: mean step reward over the rollout horizon
-- `proj`: mean target-direction projection of executed velocity commands
-- `angle`: mean angle error between commanded direction and target direction
-- `progress`: mean goal progress term (distance reduction)
-- `obstacle`: mean obstacle penalty term
-- `goal_dist`: mean distance to target over the rollout
-- `min_hazard`: mean nearest hazard distance over the rollout
-- `cmd_speed`: mean commanded speed magnitude over the rollout
-- `action_sat`: fraction of actions near saturation (|a| > 0.95)
-- `action_std`: mean policy action std (exploration scale)
-- `policy_loss`: PPO surrogate loss (clipped objective)
-- `value_loss`: critic loss (clipped value regression)
-- `approx_kl`: approximate KL divergence between old/new policy
-- `clip_frac`: fraction of samples clipped by PPO ratio
-- `elapsed`: wall-clock time since previous log line
+## Configuration Entry Points
+- Reward shaping parameters: `legged_gym_go2/legged_gym/envs/go2/go2_config.py` (`GO2HighLevelCfg.reward_shaping`)
+- Termination distances and hazards: `legged_gym_go2/legged_gym/envs/go2/go2_config.py` (`GO2RoughCfg.rewards_ext`)
+- PPO hyperparameters: `legged_gym_go2/legged_gym/envs/go2/go2_config.py` (`GO2HighLevelCfgPPO`)
+- Observation dimension: computed at end of `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
+- Low-level checkpoint path: `GO2HighLevelCfgPPO.runner.low_level_model_path`
 
 ## Common Commands
+Before running any script:
+```bash
+conda activate unitree-rl
+```
 
-### Training
+Train reward shaping:
 ```bash
 python legged_gym_go2/legged_gym/scripts/train_reward_shaping.py --headless=true --num_envs=32
 ```
 
-### Evaluation and Visualization
-No dedicated evaluation script is provided. Load checkpoints from
-`logs/logs/<experiment_name>/<timestamp>/` and integrate into your rollout or deployment tools.
+Plot arena layout:
+```bash
+python legged_gym_go2/legged_gym/scripts/plot_env_layout.py
+```
 
-### Deployment
+Plot training logs:
+```bash
+python legged_gym_go2/legged_gym/scripts/plot_training_results.py /home/caohy/repositories/MCRA_RL/logs/<experiment>/<timestamp>/training.log
+```
+
+Deploy in Mujoco (example):
 ```bash
 python legged_gym_go2/deploy/deploy_mujoco/deploy.py --checkpoint=model.pt --cfg=configs/go2.yaml
 ```
 
-## Key Parameters
-
-Reward shaping parameters (in `GO2HighLevelCfg.reward_shaping`):
-- `goal_reached_dist`
-- `collision_dist`
-- `obstacle_avoid_dist`
-- `success_reward`
-- `collision_penalty`
-- `timeout_penalty`
-- `reward_scale`
-
-Termination distances (in `GO2RoughCfg.rewards_ext`):
-- `goal_reached_dist`
-- `collision_dist`
-- `unsafe_radius_h_eval_scale`
-
 ## Development Notes
+- `train_reward_shaping.py` overrides some CLI args in `__main__` (headless + device IDs). Edit there if you need different devices.
+- `HierarchicalGO2Env` sets `terminate_on_reach_avoid` based on reward shaping flags.
+- The low-level policy is fixed; high-level training should not modify it.
 
-- **PPO advantages**: Computed by standard GAE in `rsl_rl/rsl_rl/storage/rollout_storage.py`
-- **Timeout handling**: `time_outs` bootstrap is applied in `rsl_rl/algorithms/ppo.py`
-- **Success metric**: In `train_reward_shaping.py`, success = reached before collision for episodes that end within the rollout
-
-## Troubleshooting
-
-- If success stays near zero, adjust `success_reward`, `collision_penalty`, or `obstacle_avoid_dist`
-- If value_loss spikes, lower `learning_rate` or increase `reward_clip`
-
-### notice
-执行所有脚本之前，必须先使用 conda activate unitree-rl 激活 unitree-rl 环境，之后使用 python 执行脚本。
+## Non-Negotiable Constraint
+- Do not change the high-level speed limit mapping in `update_velocity_commands` or its effective ranges.

@@ -1,5 +1,5 @@
 # 
-policy_path: "{LEGGED_GYM_ROOT_DIR}/logs/tinymal/exported/policies/policy_1.pt"
+policy_path: "/home/caohy/repositories/MCRA_RL/logs/tinymal/exported/policies/policy_1.pt"
 xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/tinymal/xml/tinymal.xml"
 
 # Total simulation time

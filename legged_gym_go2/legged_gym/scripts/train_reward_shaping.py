@@ -185,7 +185,7 @@ def train_reward_shaping(args) -> None:
     if log_dir is None:
         log_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-        base_log_root = os.path.join(repo_root, "logs", "logs")
+        base_log_root = "/home/caohy/repositories/MCRA_RL/logs"
         log_dir = os.path.join(base_log_root, train_cfg.runner.experiment_name, log_timestamp)
         os.makedirs(log_dir, exist_ok=True)
         print(f"created new log directory: {log_dir}")

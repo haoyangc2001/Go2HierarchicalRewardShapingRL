@@ -1,5 +1,5 @@
 # 
-policy_path: "{LEGGED_GYM_ROOT_DIR}/logs/rough_go2/exported/policies/policy_1.pt"
+policy_path: "/home/caohy/repositories/MCRA_RL/logs/rough_go2/exported/policies/policy_1.pt"
 xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/go2/xml/scene.xml"
 
 # Total simulation time

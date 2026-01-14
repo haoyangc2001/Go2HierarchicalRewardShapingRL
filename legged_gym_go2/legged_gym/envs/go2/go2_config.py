@@ -181,7 +181,7 @@ class GO2RoughCfgPPO( LeggedRobotCfgPPO ):
         experiment_name = 'rough_go2'
         save_interval = 500 # check for potential saves every this many iterations
         resume = True
-        resume_path = "/home/wutr/IsaacGym/legged_gym_go2/logs/rough_go2/Sep08_11-57-26_/model_18500.pt" # updated from load_run and chkpt
+        resume_path = "/home/caohy/repositories/MCRA_RL/logs/rough_go2/Sep08_11-57-26_/model_18500.pt" # updated from load_run and chkpt
 
 
 class GO2HighLevelCfg(GO2RoughCfg):
@@ -243,7 +243,7 @@ class GO2HighLevelCfgPPO(LeggedRobotCfgPPO):
         resume = False
         resume_path = "/home/caohy/repositories/MCRA_RL/legged_gym_go2/legged_gym/scripts/logs/high_level_go2/20260105-102613/model_1300.pt"  # 你的checkpoint路径
         # 底层策略模型路径
-        low_level_model_path = "/home/caohy/repositories/MCRA_RL/legged_gym_go2/logs/rough_go2/Sep08_11-57-26_/model_18500.pt"
+        low_level_model_path = "/home/caohy/repositories/MCRA_RL/logs/rough_go2/Sep08_11-57-26_/model_18500.pt"
 
 _base_high_level_obs = 8
 _target_dim = GO2HighLevelCfg.target_lidar_num_bins
