@@ -8,7 +8,7 @@ import isaacgym
 import torch
 
 from legged_gym.envs.go2.go2_config import GO2HighLevelCfg, GO2HighLevelCfgPPO
-from legged_gym.scripts.train_reach_avoid import (
+from legged_gym.utils.hierarchical_env_utils import (
     HierarchicalVecEnv,
     create_env,
 )

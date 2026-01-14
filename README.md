@@ -38,9 +38,9 @@ python legged_gym_go2/legged_gym/scripts/train_reward_shaping.py --headless=true
 ```
 
 ## Evaluation
-```bash
-python legged_gym_go2/legged_gym/scripts/play_reach_avoid.py --model_path=logs/logs/high_level_go2_reward_shaping/.../model_1000.pt
-```
+No dedicated evaluation script is included. You can load saved checkpoints from
+`logs/logs/<experiment_name>/<timestamp>/` and integrate them into your own
+rollout or deployment workflow.
 
 ## Configuration Entry Points
 - Reward shaping parameters:  

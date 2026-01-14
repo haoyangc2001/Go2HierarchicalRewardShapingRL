@@ -119,9 +119,8 @@ python legged_gym_go2/legged_gym/scripts/train_reward_shaping.py --headless=true
 ```
 
 ### Evaluation and Visualization
-```bash
-python legged_gym_go2/legged_gym/scripts/play_reach_avoid.py --model_path=logs/high_level_go2_reward_shaping/.../model_1000.pt
-```
+No dedicated evaluation script is provided. Load checkpoints from
+`logs/logs/<experiment_name>/<timestamp>/` and integrate into your rollout or deployment tools.
 
 ### Deployment
 ```bash
