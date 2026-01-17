@@ -100,12 +100,15 @@ With default `action_scale = [1, 1, 1]`, the effective command ranges are:
   `/home/caohy/repositories/MCRA_RL/logs/<experiment_name>/<timestamp>/`
 - The training log file is `training.log`.
 - Logged metrics include: `success`, `reach`, `collision`, `timeout`, `cost`, `avg_reward`, `proj`,
-  `angle`, `progress`, `obstacle`, `goal_dist`, `min_hazard`, `cmd_speed`, `action_sat`,
+  `angle`, `progress`, `obstacle`, `goal_dist`, `min_hazard`, `cmd_speed`, `body_speed`,
+  `speed_ratio`, `speed_ratio_active`, `cmd_delta`, `cmd_zero`, `cmd_std_vx`, `cmd_std_vy`, `cmd_std_vyaw`,
+  `cmd_speed_std`, `action_sat`, `done_frac`,
   `action_std`, `policy_loss`, `value_loss`, `approx_kl`, `clip_frac`, `elapsed`,
   plus PPO/diagnostic metrics such as `entropy`, `lr`, `ratio_mean`, `ratio_max`,
   `logp_diff_max`, `approx_kl_raw`, `grad_norm`, `value_clip_frac`, `Vmean`, `Vstd`,
   `Rmean`, `Rstd`, `adv_mean`, `adv_std`, `reward_clip`, `hazard_p10`, `hazard_p50`,
   `hazard_p90`, `boundary_violation`, `boundary_collision`, `obstacle_collision`,
+  `boundary_collision_rate`, `obstacle_collision_rate`,
   `ep_len_mean`, `ep_len_std`, `init_goal_dist`.
 
 ### Training Log Field Meanings
@@ -123,6 +126,15 @@ With default `action_scale = [1, 1, 1]`, the effective command ranges are:
 - `goal_dist`: 平均目标距离 `reach_metric`（XY 平面距离，单位米）。
 - `min_hazard`: 平均最近危险距离（障碍表面距离与边界距离的最小值，可能为负表示进入危险/越界）。
 - `cmd_speed`: 平均平面速度命令 `||v_cmd_xy||`（单位同底层命令，通常 m/s）。
+- `body_speed`: 平均机体平面速度 `||v_body_xy||`（单位 m/s）。
+- `speed_ratio`: `body_speed / cmd_speed` 的均值（命令能否转化为实际速度的粗略指标）。
+- `speed_ratio_active`: 仅在 `cmd_speed > 0.1` 时统计的 `speed_ratio` 均值（过滤低指令/停滞步）。
+- `cmd_delta`: 高层速度命令相邻步差值的均值（`||cmd_t - cmd_{t-1}||`）。
+- `cmd_zero`: `cmd_speed < 0.1` 的比例（高层几乎不下发平面速度的步比例）。
+- `cmd_std_vx`: 高层命令 `vx` 的均值标准差（跨 env 统计，按步平均）。
+- `cmd_std_vy`: 高层命令 `vy` 的均值标准差（跨 env 统计，按步平均）。
+- `cmd_std_vyaw`: 高层命令 `vyaw` 的均值标准差（跨 env 统计，按步平均）。
+- `cmd_speed_std`: 高层命令平面速度模长 `||v_cmd_xy||` 的标准差（跨 env 统计，按步平均）。
 - `action_sat`: 动作饱和比例，统计 `|a| > 0.95` 的比例（tanh 输出接近边界）。
 - `action_std`: 策略分布 std 的均值（探索强度指标）。
 - `policy_loss`: PPO 策略损失的迭代均值。
@@ -150,6 +162,9 @@ With default `action_scale = [1, 1, 1]`, the effective command ranges are:
 - `boundary_violation`: 越界比例（boundary_distance < 0）。
 - `boundary_collision`: 每步发生边界碰撞的平均比例（基于最近危险源判定）。
 - `obstacle_collision`: 每步发生障碍物碰撞的平均比例（基于最近危险源判定）。
+- `boundary_collision_rate`: 按 episode 结束统计的边界碰撞率（与 `collision` 同口径）。
+- `obstacle_collision_rate`: 按 episode 结束统计的障碍碰撞率（与 `collision` 同口径）。
+- `done_frac`: 每步 done 标记的平均比例（高层终止频率）。
 - `ep_len_mean`: 本迭代内完成的 episode 平均步数。
 - `ep_len_std`: episode 步数标准差。
 - `init_goal_dist`: 每次迭代开始时的目标初始距离均值。

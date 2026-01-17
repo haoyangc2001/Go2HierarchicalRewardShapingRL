@@ -198,11 +198,15 @@ class GO2HighLevelCfg(GO2RoughCfg):
         # Reward shaping parameters aligned with the reference environment.
         goal_reached_dist = 0.3
         collision_dist = 0.35
-        obstacle_avoid_dist = 1.0
-        forward_reward_scale = 0.5
-        yaw_penalty_scale = 0.2
-        obstacle_penalty_scale = 0.25
-        goal_progress_scale = 5.0
+        obstacle_avoid_dist = 1.2
+        forward_reward_scale = 1.5
+        command_proj_weight = 0.25
+        yaw_penalty_scale = 0.1
+        obstacle_penalty_scale = 0.3
+        goal_progress_scale = 60.0
+        speed_mismatch_scale = 0.1
+        body_speed_scale = 0.2
+        cmd_delta_scale = 0.05
         success_reward = 120.0
         collision_penalty = 120.0
         timeout_penalty = 0.0
@@ -224,24 +228,24 @@ class GO2HighLevelCfgPPO(LeggedRobotCfgPPO):
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
         entropy_coef = 0.001
-        learning_rate = 2e-5  # smaller step for stability under sparse terminal rewards
+        learning_rate = 3e-5  # smaller step for stability under sparse terminal rewards
         clip_param = 0.1
-        value_clip_param = 0.2
+        value_clip_param = 0.1
         value_loss_coef = 0.5
         schedule = 'adaptive'
-        desired_kl = 0.02
-        min_lr = 1e-6
-        max_lr = 2e-4
+        desired_kl = 0.03
+        min_lr = 5e-6
+        max_lr = 8e-5
         num_learning_epochs = 3
         num_mini_batches = 4
         num_steps_per_env = 200 # increase horizon to give more time to reach the goal
-        max_grad_norm = 0.5
+        max_grad_norm = 0.6
 
     class runner(LeggedRobotCfgPPO.runner):
         run_name = ''
         experiment_name = 'high_level_go2'
-        max_iterations = 3000
-        save_interval = 100
+        max_iterations = 30000
+        save_interval = 200
         # gh_dump_interval = 50  # iteration interval for dumping g/h tensors
         resume = False
         resume_path = "/home/caohy/repositories/MCRA_RL/legged_gym_go2/legged_gym/scripts/logs/high_level_go2/20260105-102613/model_1300.pt"  # 你的checkpoint路径

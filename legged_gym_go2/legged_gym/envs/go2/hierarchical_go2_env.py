@@ -118,12 +118,22 @@ class HierarchicalGO2Env:
             self.high_level_config.unsafe_sphere_radius = self.cfg.rewards_ext.unsafe_sphere_radius
             self.high_level_config.target_radius = self.cfg.rewards_ext.target_sphere_radius
             self.high_level_config.target_sphere_pos = self.cfg.rewards_ext.target_sphere_pos
+            if hasattr(self.cfg.rewards_ext, "boundary_margin"):
+                self.high_level_config.boundary_margin = self.cfg.rewards_ext.boundary_margin
         if hasattr(self.cfg, "enable_manual_lidar"):
             self.high_level_config.enable_manual_lidar = self.cfg.enable_manual_lidar
         if hasattr(self.cfg, "lidar_max_range"):
             self.high_level_config.lidar_max_range = self.cfg.lidar_max_range
         if hasattr(self.cfg, "lidar_num_bins"):
             self.high_level_config.lidar_num_bins = self.cfg.lidar_num_bins
+        if hasattr(self.cfg, "terrain"):
+            terrain_length = getattr(self.cfg.terrain, "terrain_length", None)
+            terrain_width = getattr(self.cfg.terrain, "terrain_width", None)
+            if terrain_length and terrain_width:
+                self.high_level_config.boundary_half_extents = (
+                    float(terrain_length) * 0.5,
+                    float(terrain_width) * 0.5,
+                )
 
     def reset(self):
         """Reset the environment and return high-level observations and metrics."""
@@ -153,6 +163,14 @@ class HierarchicalGO2Env:
         avoid_metric = None
         reach_metric = None
         aggregated_dones = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        done_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        avoid_buf = None
+        reach_buf = None
+        min_hazard_buf = None
+        boundary_buf = None
+        obstacle_surface_buf = None
+        base_lin_vel_buf = None
+        time_outs_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         for _ in range(self.low_level_action_repeat):
             self.base_env.commands[:, :3] = desired_velocity_commands
             self.base_env.compute_observations()
@@ -164,21 +182,60 @@ class HierarchicalGO2Env:
                 low_level_actions
             )
 
-            aggregated_dones |= step_dones.bool()
+            step_dones = step_dones.bool()
+            step_time_outs = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            if isinstance(base_infos, dict) and "time_outs" in base_infos:
+                step_time_outs = base_infos["time_outs"].to(self.device).bool()
+
+            if reach_buf is None:
+                reach_buf = reach_metric.clone()
+                avoid_buf = avoid_metric.clone()
+                min_hazard_buf = self.base_env.min_hazard_distance.clone()
+                boundary_buf = self.base_env.boundary_distance.clone()
+                obstacle_surface_buf = self.base_env.obstacle_surface_distance.clone()
+                base_lin_vel_buf = self.base_env.base_lin_vel.clone()
+                time_outs_buf = step_time_outs.clone()
+            else:
+                update_mask = ~done_mask
+                reach_buf = torch.where(update_mask, reach_metric, reach_buf)
+                avoid_buf = torch.where(update_mask, avoid_metric, avoid_buf)
+                min_hazard_buf = torch.where(
+                    update_mask, self.base_env.min_hazard_distance, min_hazard_buf
+                )
+                boundary_buf = torch.where(update_mask, self.base_env.boundary_distance, boundary_buf)
+                obstacle_surface_buf = torch.where(
+                    update_mask, self.base_env.obstacle_surface_distance, obstacle_surface_buf
+                )
+                base_lin_vel_buf = torch.where(
+                    update_mask.unsqueeze(1), self.base_env.base_lin_vel, base_lin_vel_buf
+                )
+                time_outs_buf = torch.where(update_mask, step_time_outs, time_outs_buf)
+
+            done_mask |= step_dones
+            aggregated_dones |= step_dones
 
         # 4. Compute the updated high-level observation
         self.high_level_env._compute_high_level_observations()
         high_level_obs = self.high_level_env.get_observations()
 
         # 5. Convert reach/avoid metrics into g/h values
-        g_values, h_values = self.high_level_env.compute_g_h_values(avoid_metric, reach_metric)
+        g_values, h_values = self.high_level_env.compute_g_h_values(avoid_buf, reach_buf)
 
         # 6. Assemble info dictionary for logging/debugging
+        base_infos = dict(base_infos) if isinstance(base_infos, dict) else {}
+        base_infos["time_outs"] = time_outs_buf
+        reach_metric_post = self.base_env.reach_metric.clone()
         infos = {
             'base_infos': base_infos,
-            'avoid_metric': avoid_metric,
-            'reach_metric': reach_metric,
-            'base_obs': base_obs
+            'avoid_metric': avoid_buf,
+            'reach_metric': reach_buf,
+            'reach_metric_post': reach_metric_post,
+            'min_hazard_distance': min_hazard_buf,
+            'boundary_distance': boundary_buf,
+            'obstacle_surface_distance': obstacle_surface_buf,
+            'base_lin_vel': base_lin_vel_buf,
+            'base_obs': base_obs,
+            'desired_commands': desired_velocity_commands,
         }
 
         return high_level_obs, g_values, h_values, aggregated_dones, infos

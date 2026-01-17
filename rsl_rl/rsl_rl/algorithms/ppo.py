@@ -225,9 +225,9 @@ class PPO:
         mean_value_clip_frac /= num_updates
         mean_grad_norm /= num_updates
         if self.desired_kl is not None and self.schedule == 'adaptive':
-            if mean_approx_kl_raw > self.desired_kl * 2.0:
+            if mean_approx_kl > self.desired_kl * 2.0:
                 self.learning_rate = max(self.min_lr, self.learning_rate / 1.5)
-            elif mean_approx_kl_raw < self.desired_kl / 2.0 and mean_approx_kl_raw > 0.0:
+            elif mean_approx_kl < self.desired_kl / 2.0 and mean_approx_kl > 0.0:
                 self.learning_rate = min(self.max_lr, self.learning_rate * 1.5)
 
             for param_group in self.optimizer.param_groups:

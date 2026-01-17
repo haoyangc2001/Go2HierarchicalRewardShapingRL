@@ -105,6 +105,13 @@ class HighLevelNavigationEnv:
         self.base_env.commands[:, 0] = velocity_commands[:, 0] * 0.6  # vx
         self.base_env.commands[:, 1] = velocity_commands[:, 1] * 0.2 # vy
         self.base_env.commands[:, 2] = velocity_commands[:, 2] * 0.8# vyaw
+        forward = quat_apply(
+            self.base_env.base_quat,
+            self.forward_vec.unsqueeze(0).expand(self.num_envs, -1),
+        )
+        heading = torch.atan2(forward[:, 1], forward[:, 0])
+        # Align heading command so heading-based yaw control follows desired vyaw.
+        self.base_env.commands[:, 3] = heading + 2.0 * self.base_env.commands[:, 2]
 
     def compute_g_h_values(self, avoid_metric, reach_metric):
         """
