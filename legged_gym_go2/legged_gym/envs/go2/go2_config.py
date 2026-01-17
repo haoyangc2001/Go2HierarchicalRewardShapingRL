@@ -188,6 +188,8 @@ class GO2HighLevelCfg(GO2RoughCfg):
     """高层导航策略配置"""
 
     seed = 1  # keep interfaces stable by using a fixed seed
+    reach_metric_scale = 0.2
+    action_scale = [1.3, 1.0, 1.0]
     enable_manual_lidar = True
     lidar_max_range = 8.0
     lidar_num_bins = 16
@@ -195,21 +197,23 @@ class GO2HighLevelCfg(GO2RoughCfg):
     target_lidar_max_range = 8.0
 
     class reward_shaping:
-        # Reward shaping parameters aligned with the reference environment.
+        # Reward shaping parameters for high-level navigation.
         goal_reached_dist = 0.3
         collision_dist = 0.35
         obstacle_avoid_dist = 1.2
-        forward_reward_scale = 1.5
-        command_proj_weight = 0.25
-        yaw_penalty_scale = 0.1
-        obstacle_penalty_scale = 0.3
-        goal_progress_scale = 60.0
-        speed_mismatch_scale = 0.1
-        body_speed_scale = 0.2
-        cmd_delta_scale = 0.05
-        success_reward = 120.0
-        collision_penalty = 120.0
-        timeout_penalty = 0.0
+        progress_scale = 45.0
+        alignment_scale = 2.0
+        obstacle_penalty_scale = 0.6
+        yaw_rate_scale = 0.02
+        action_smooth_scale = 0.08
+        body_speed_scale = 1.0
+        command_alignment_scale = 0.6
+        idle_speed_threshold = 0.1
+        idle_distance_threshold = 0.5
+        idle_penalty_scale = 0.6
+        success_reward = 100.0
+        collision_penalty = 50.0
+        timeout_penalty = 10.0
         reward_scale = 1.0
         reward_clip = 200.0
         terminate_on_safety_violation = True
@@ -218,7 +222,8 @@ class GO2HighLevelCfg(GO2RoughCfg):
     class env(GO2RoughCfg.env):
         num_observations = 7  # placeholder; overwritten below
         num_actions = 3       # [vx, vy, vyaw]
-        high_level_action_repeat = 5  # number of low-level steps per high-level action
+        high_level_action_repeat = 10  # number of low-level steps per high-level action
+        episode_length_s = 40
 
 class GO2HighLevelCfgPPO(LeggedRobotCfgPPO):
     """高层导航策略PPO配置"""
@@ -227,19 +232,19 @@ class GO2HighLevelCfgPPO(LeggedRobotCfgPPO):
         init_noise_std = 0.3
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
-        entropy_coef = 0.001
-        learning_rate = 3e-5  # smaller step for stability under sparse terminal rewards
-        clip_param = 0.1
-        value_clip_param = 0.1
+        entropy_coef = 0.003
+        learning_rate = 3e-4
+        clip_param = 0.2
+        value_clip_param = 0.2
         value_loss_coef = 0.5
         schedule = 'adaptive'
         desired_kl = 0.03
         min_lr = 5e-6
-        max_lr = 8e-5
+        max_lr = 5e-4
         num_learning_epochs = 3
         num_mini_batches = 4
         num_steps_per_env = 200 # increase horizon to give more time to reach the goal
-        max_grad_norm = 0.6
+        max_grad_norm = 1.0
 
     class runner(LeggedRobotCfgPPO.runner):
         run_name = ''

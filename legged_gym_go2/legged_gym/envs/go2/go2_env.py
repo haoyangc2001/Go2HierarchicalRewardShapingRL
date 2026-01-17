@@ -12,18 +12,16 @@ class GO2Robot(LeggedRobot):
         """ Reset all robots"""
         # print("test1")
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
-        obs, privileged_obs, _, _, _ , _, _= self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
+        obs, privileged_obs, _, _, _ = self.step(
+            torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False)
+        )
         return obs, privileged_obs
 
     def step(self, actions):
         """
-        Overrides the base class step to add custom metrics to the return values.
+        Step wrapper for the GO2 environment.
         """
-        # Call the parent class's step method to get the standard outputs
-        obs, privileged_obs, rews, dones, infos = super().step(actions)
-
-        # Return the original values plus the new metrics
-        return obs, privileged_obs, rews, dones, infos, self.avoid_metric, self.reach_metric
+        return super().step(actions)
 
     def check_termination(self):
         """Extend termination conditions with safety violations and goal reaching."""
@@ -82,14 +80,66 @@ class GO2Robot(LeggedRobot):
 
         terrain_length = getattr(self.cfg.terrain, "terrain_length", 6.0)
         terrain_width = getattr(self.cfg.terrain, "terrain_width", 6.0)
-        spawn_range_x = max(terrain_length * 0.5, 0.0)
-        spawn_range_y = max(terrain_width * 0.5, 0.0)
+        half_length = max(terrain_length * 0.5, 0.0)
+        half_width = max(terrain_width * 0.5, 0.0)
+        spawn_range_x = half_length
+        spawn_range_y = half_width
 
-        random_x = torch_rand_float(-spawn_range_x, spawn_range_x, (len(env_ids), 1), device=self.device)
-        random_y = torch_rand_float(-spawn_range_y, spawn_range_y, (len(env_ids), 1), device=self.device)
+        env_ids = env_ids.to(self.device)
+        num_ids = len(env_ids)
+        env_origins = self.env_origins[env_ids]
 
-        self.root_states[env_ids, 0] = random_x.squeeze(-1) + self.env_origins[env_ids, 0]
-        self.root_states[env_ids, 1] = random_y.squeeze(-1) + self.env_origins[env_ids, 1]
+        spawn_clearance = getattr(self.cfg.rewards_ext, "spawn_clearance", None)
+        if spawn_clearance is None:
+            spawn_clearance = getattr(self.cfg.rewards_ext, "collision_dist", 0.4)
+        spawn_clearance = float(spawn_clearance)
+        max_tries = int(getattr(self.cfg.rewards_ext, "spawn_max_tries", 10))
+
+        rand_x = torch_rand_float(-spawn_range_x, spawn_range_x, (num_ids, 1), device=self.device)
+        rand_y = torch_rand_float(-spawn_range_y, spawn_range_y, (num_ids, 1), device=self.device)
+        pos_xy = torch.cat((rand_x, rand_y), dim=1)
+
+        unsafe_spheres_pos_base = None
+        if hasattr(self.cfg.rewards_ext, "unsafe_spheres_pos") and len(self.cfg.rewards_ext.unsafe_spheres_pos) > 0:
+            unsafe_spheres_pos_base = torch.tensor(
+                self.cfg.rewards_ext.unsafe_spheres_pos,
+                device=self.device,
+                dtype=torch.float,
+            )
+        else:
+            unsafe_pos = getattr(self.cfg.rewards_ext, "unsafe_sphere_pos", None)
+            if unsafe_pos is not None:
+                unsafe_spheres_pos_base = torch.tensor(
+                    [unsafe_pos], device=self.device, dtype=torch.float
+                )
+
+        for _ in range(max_tries):
+            invalid = torch.zeros(num_ids, device=self.device, dtype=torch.bool)
+            if half_length > 0.0 and half_width > 0.0:
+                boundary_gap_x = half_length - torch.abs(pos_xy[:, 0])
+                boundary_gap_y = half_width - torch.abs(pos_xy[:, 1])
+                boundary_distance = torch.min(boundary_gap_x, boundary_gap_y)
+                invalid |= boundary_distance < spawn_clearance
+            if unsafe_spheres_pos_base is not None:
+                obstacle_centers = env_origins.unsqueeze(1) + unsafe_spheres_pos_base.unsqueeze(0)
+                obstacle_rel = pos_xy.unsqueeze(1) - obstacle_centers[:, :, :2]
+                obstacle_dist = torch.norm(obstacle_rel, dim=2)
+                obstacle_surface = obstacle_dist - float(self.cfg.rewards_ext.unsafe_sphere_radius)
+                invalid |= obstacle_surface.min(dim=1).values < spawn_clearance
+            if not invalid.any():
+                break
+            resample = invalid.nonzero(as_tuple=False).squeeze(-1)
+            if resample.numel() == 0:
+                break
+            pos_xy[resample, 0] = torch_rand_float(
+                -spawn_range_x, spawn_range_x, (resample.numel(), 1), device=self.device
+            ).squeeze(-1)
+            pos_xy[resample, 1] = torch_rand_float(
+                -spawn_range_y, spawn_range_y, (resample.numel(), 1), device=self.device
+            ).squeeze(-1)
+
+        self.root_states[env_ids, 0] = pos_xy[:, 0] + env_origins[:, 0]
+        self.root_states[env_ids, 1] = pos_xy[:, 1] + env_origins[:, 1]
 
         # randomize yaw so rollouts explore diverse headings
         random_yaw = torch_rand_float(-math.pi, math.pi, (len(env_ids), 1), device=self.device).squeeze(-1)

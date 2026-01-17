@@ -1,5 +1,3 @@
-from typing import Tuple
-
 import torch
 
 from legged_gym.envs.go2.hierarchical_go2_env import HierarchicalGO2Env
@@ -14,14 +12,14 @@ class HierarchicalVecEnv:
         self.num_obs = env.num_obs
         self.num_actions = env.num_actions
         self.device = env.device
+        self.num_privileged_obs = None
 
-    def reset(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        obs, g_vals, h_vals = self.env.reset()
-        return obs, g_vals, h_vals
+    def reset(self) -> torch.Tensor:
+        return self.env.reset()
 
     def step(self, actions: torch.Tensor):
-        obs, g_vals, h_vals, dones, infos = self.env.step(actions)
-        return obs, g_vals, h_vals, dones, infos
+        obs, rewards, dones, infos = self.env.step(actions)
+        return obs, rewards, dones, infos
 
     def close(self) -> None:
         self.env.close()

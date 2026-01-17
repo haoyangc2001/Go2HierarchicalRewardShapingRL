@@ -1,222 +1,190 @@
-# Debug Summary (Reward Shaping PPO Success Rate)
+# Debug Summary
+# 20160117-121702
+## Analysis Conclusions
+- Using target direction as vx/vy caused mixed progress; switching to "forward + turn toward target" makes progress consistently positive.
+- Low-level tracking is healthy: body_speed tracks cmd_speed at ~0.9 ratio in diagnostics.
+- Reward now uses real target distance (`reach_metric`) so progress/success are reliable.
+- Lidar-estimated target distance (`target_distance_est`) is systematically larger than real `reach_metric` by ~1.2-1.3 m, indicating a bias in the perception-derived distance. This affects observation scale but not reward now.
 
-## 20260116-121100 现象与日志结论
-- success 维持在 ~1%，collision 仍高（约 0.68）；avg_reward 改善但 progress 很小。
-- cmd_speed 上升、body_speed 维持 ~0.042，speed_ratio 下降；目标距离与 min_hazard 基本不变。
-- 新增指令统计显示：cmd_zero 降、cmd_delta 仍高、cmd_std_* 上升，指令更“激进”但未转化为到达率。
-- PPO 更新仍有极端尖峰（ratio_max、logp_diff_max、grad_norm）。
-- 初步判断：指令抖动/策略不稳定导致“乱冲 + 碰撞/重置”，而非低层跟踪问题。
+## Code Changes
+- Reward uses real distance for progress and success:
+  - `legged_gym_go2/legged_gym/envs/go2/hierarchical_go2_env.py`
+    - Reward and progress now use `reach_metric` instead of lidar-estimated distance.
+    - Info now includes `target_distance_est` and `reach_metric` for comparison.
+- Diagnostics updated for "forward + turn" control and distance comparison:
+  - `legged_gym_go2/legged_gym/scripts/diagnose_command_tracking.py`
+    - Command: `vx` fixed, `vy=0`, `vyaw` from `atan2(target_dir)`.
+    - Logs both `goal_dist` (lidar estimate) and `reach_metric` (real).
 
-### 修改代码，验证“指令抖动”主因
-- 调整 `high_level_action_repeat`：5 → 10，用于测试是否能降低指令抖动。
-
-## 20260116-131156 现象与日志结论
-- cmd_delta 未下降，指令分布仍更分散；抖动并未缓解。
-- success 进一步下降（~0.34%），collision 下降但成功率未提升，策略趋于保守。
-- 结论：抖动不是由动作频率导致，核心仍在高层策略/奖励结构。
-
-### 修改代码与后续调整方向
-- 恢复 `high_level_action_repeat` 至 5。
-- 继续微调奖励/超参以增强真实进度、降低 PPO 极端更新：
-  - `goal_progress_scale` 20.0 → 25.0
-  - `clip_param` 0.08 → 0.06
-  - `desired_kl` 0.02 → 0.015
-  - `max_lr` 1e-4 → 5e-5
-  - `max_grad_norm` 1.0 → 0.8
-- 解释并新增 `speed_ratio_active`：仅统计 `cmd_speed > 0.1`，用于诊断“有指令时的跟踪效率”，不直接提升成功率。
-
-## 20260116-151036 现象与日志结论
-- 训练日志中成功率长期在 1% 左右，且碰撞率约 0.65，超时接近 0。
-- `progress` 接近 0、`goal_dist` 基本不变，说明对目标推进不足。
-- `cmd_speed` 与 `body_speed` 存在明显差距，但用户已通过 `check_low_level_tracking.py` 确认底层跟踪能力正常。
-
-### 排查与分析内容
-- 统计口径问题：
-  - `collision` 按 episode 结束统计；
-  - `boundary_collision`/`obstacle_collision` 按 step 统计，数值会比 episode 口径小很多。
-  - 因此出现 `collision` 高、`boundary_collision` 近 0 的“统计差异”现象。
-- 观测构造检查：
-  - 目标方向与激光雷达观测未发现明显常量/错误归一化导致的退化。
-  - 重点问题转移到控制与奖励/难度配置。
-- 控制通道问题：
-  - 底层 `heading_command=True` 时，`commands[2]` 会由 `commands[3]` 计算；
-  - 高层仅设置 `commands[:3]`，导致 `commands[3]` 随机重采样，造成 yaw 指令被随机覆盖。
-  - 结论：高层 yaw 控制通道存在失真。
-- 奖励/难度问题：
-  - 正向推进奖励偏弱（`command_proj_weight=0`，几乎只靠实际速度投影）。
-  - 碰撞惩罚偏大、终止严格，探索被强惩罚限制。
-  - 障碍密度高、初始位置随机，任务难度较大。
-
-### 已做代码修改
-1) 同步高层 yaw 目标至 `commands[3]`，修复 heading 模式下的 yaw 失真  
-   - 文件：`legged_gym_go2/legged_gym/envs/go2/high_level_navigation_env.py`  
-   - 修改：根据当前朝向和 `vyaw` 计算目标航向，写入 `commands[3]`
-
-2) 奖励权重微调（增强推进信号、降低惩罚强度）  
-   - 文件：`legged_gym_go2/legged_gym/envs/go2/go2_config.py`  
-   - 修改：
-     - `forward_reward_scale` 1.2 → 1.5  
-     - `command_proj_weight` 0.0 → 0.3  
-     - `obstacle_penalty_scale` 0.4 → 0.3  
-     - `goal_progress_scale` 25.0 → 30.0  
-     - `collision_penalty` 150.0 → 120.0
-
-3) 记录同口径碰撞统计（episode 口径）  
-   - 文件：`legged_gym_go2/legged_gym/scripts/train_reward_shaping.py`  
-   - 新增日志字段：`boundary_collision_rate` / `obstacle_collision_rate`
-   - 同步更新说明：`AGENTS.md`
+## Next Steps
+- Decide whether to correct observation distance:
+  - Option A: replace obs[5] with real `reach_metric` while keeping lidar bins for perception.
+  - Option B: calibrate `target_distance_est` via a linear scale/offset to match `reach_metric`.
+- If training stability is still an issue after observation fix, retune reward weights (primarily `progress_scale` and `obstacle_penalty_scale`).
 
 
-### 下一步建议
-1) 先短训 50–100 iter 验证修复效果，观察 `proj / progress / success / collision` 是否改善。  
-2) 若仍偏低，可进一步：
-   - 提升 `command_proj_weight` 至 0.4；
-   - 或再提升 `goal_progress_scale`（例如 35）。
-3) 若仍难提升，考虑引入 curriculum（缩小初始采样范围或减少障碍数量）。
+# 20160117-123005
+## 分析结论
+- 目标方向直接作为 vx/vy 会导致进度正负混合；改成“前进 + 转向到目标”后进度稳定为正。
+- 低层跟踪正常，`body_speed / cmd_speed` 约 0.9。
+- 目标距离估计存在系统性偏差：雷达反推的 `goal_dist` 比真实 `reach_metric` 大约 1.2~1.3 m。
+- 奖励已改为使用真实 `reach_metric`，因此训练不会被距离估计偏差误导，但观测尺度仍可能影响策略理解。
 
-## 20260116-165512 现象与日志结论
-- success 仍维持在 ~1%（前10轮 0.0117，后10轮 0.0135），collision 约 0.66，timeout 为 0。
-- avg_reward 明显改善（-0.3085 → -0.0573），但 progress 仍接近 0，goal_dist 基本不变（~4.35）。
-- proj 上升、angle 下降（1.47 → 0.43），说明“指令方向对齐”变好，但真实接近目标没有提升。
-- cmd_speed 大幅上升（0.153 → 0.383），body_speed 几乎不变（~0.042），speed_ratio 与 speed_ratio_active 显著下降（0.47 → 0.13）。
-- 指令分布更激进：cmd_zero 近 0，cmd_std_vx/vy/vyaw 与 cmd_speed_std 上升，cmd_delta 仍偏大。
-- PPO 更新过激仍存在：approx_kl 从 ~0.001 升到 ~0.12，ratio_max、logp_diff_max 很高，entropy 略降。
-- 结论：奖励主要驱动了“对齐与指令强度”，但没有驱动真实推进；PPO 更新偏激进影响收敛。
-
-### 修改代码与方向调整
-- 让方向误差与真实速度对齐，并引入“速度不匹配惩罚”：
+## 代码变更
+- 高层观测第 6 维改为真实 `reach_metric`（米），雷达 bins 保留用于感知：
+  - `legged_gym_go2/legged_gym/envs/go2/high_level_navigation_env.py`
+- 奖励/进度使用真实距离，info 中输出真实与估计距离对比：
+  - `legged_gym_go2/legged_gym/envs/go2/hierarchical_go2_env.py`
+- 诊断脚本改为“前进 + 转向到目标”，并同时打印 `goal_dist` 与 `reach_metric`：
+  - `legged_gym_go2/legged_gym/scripts/diagnose_command_tracking.py`
+- 训练日志字段清理与口径修正：
   - `legged_gym_go2/legged_gym/scripts/train_reward_shaping.py`
-    - `angle_error` 改为基于 `body_dir`，并用 `body_speed` 做门控。
-    - 新增 `speed_mismatch_scale`（仅在 `cmd_speed > 0.1` 时惩罚 `command_speed - body_speed`）。
-    - 新增日志组件 `speed_mismatch`。
-- 奖励与 PPO 超参调整：
-  - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
-    - `command_proj_weight` 0.3 → 0.0
-    - `goal_progress_scale` 30.0 → 35.0
-    - 新增 `speed_mismatch_scale = 0.2`
-    - `learning_rate` 2e-5 → 1e-5
-    - `clip_param` 0.06 → 0.05
-    - `desired_kl` 0.015 → 0.01
-    - `min_lr` 5e-6 → 2e-6
-    - `max_lr` 5e-5 → 2e-5
-    - `num_learning_epochs` 3 → 2
-    - `num_mini_batches` 4 → 2
-    - `max_grad_norm` 0.8 → 0.6
+    - `goal_dist` 与 `init_goal_dist` 采用真实 `reach_metric`。
+    - `min_hazard` 使用真实危险距离。
+    - 删除冗余/低参考价值指标（命令 std、ratio_max 等）。
+- 文档更新：
+  - `AGENTS.md` 观测说明与日志字段列表同步最新实现。
 
-### 下一步建议
-1) 用当前修改重新训练 50–100 iter，观察 `progress/goal_dist/body_speed/speed_ratio_active` 是否抬升、`approx_kl` 是否显著下降。  
-2) 若 `speed_ratio_active` 仍很低，可将 `speed_mismatch_scale` 逐步提高到 0.3–0.4。  
-3) 若 KL 仍偏高，考虑进一步降低更新强度（如 `num_learning_epochs=1` 或引入 KL 早停）。  
+## 下一步建议
+- 重新跑一次训练，确认 `goal_dist`/`init_goal_dist` 与真实距离一致，`progress` 持续为正。
+- 若训练仍不稳定，优先微调 `progress_scale` 与 `obstacle_penalty_scale`。
+- 若需要区分“摔倒失败”与“真实碰撞”，可新增独立 `failure_rate` 指标（当前 `collision` 已对齐危险距离）。
 
-## 20260116-184939 现象与日志结论
-- success 仍在 ~1%，collision ~0.66，timeout 为 0。
-- avg_reward 未改善（-0.326 → -0.328），proj 仍接近 0，angle 维持 ~1.56，说明“朝向对齐”未学到。
-- progress/goal_dist 基本不变，真实接近目标没有提升。
-- cmd_speed 维持 ~0.15，cmd_zero ~0.34，指令整体偏小且大量为零。
-- speed_ratio_active ~0.243，反映并非低层跟踪问题，而是高层指令本身偏弱。
-- PPO 更新过于保守：approx_kl ~1e-4、ratio_max ~1.2、clip_frac ≈ 0，策略几乎不更新。
-- 结论：策略“学不动”，落在低指令/低推进的局部最优。
+---
 
-### 修改代码与方向调整
-- 恢复 PPO 更新强度、抑制过度保守更新：
-  - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
-    - `learning_rate` 1e-5 → 2e-5
-    - `clip_param` 0.05 → 0.08
-    - `desired_kl` 0.01 → 0.02
-    - `min_lr` 2e-6 → 5e-6
-    - `max_lr` 2e-5 → 5e-5
-    - `num_learning_epochs` 2 → 3
-    - `num_mini_batches` 2 → 4
-- 降低“速度不匹配惩罚”以避免策略靠小指令逃惩罚：
-  - `speed_mismatch_scale` 0.2 → 0.1
-- 恢复部分指令引导：
-  - `command_proj_weight` 0.0 → 0.15
-- 角度惩罚门控更严格，避免低速噪声惩罚：
-  - `legged_gym_go2/legged_gym/scripts/train_reward_shaping.py`
-    - `angle_mask`：`body_speed > 1e-3` → `body_speed > 0.1`
+## 追加记录（按优先顺序修改）
 
-### 下一步建议
-1) 重新训练 50–100 iter，观察 `approx_kl` 是否回升到 0.005–0.02、`proj/progress` 是否同步抬升。  
-2) 若仍“学不动”，可进一步上调 `learning_rate` 或 `clip_param`（小幅）。  
-3) 若 `cmd_speed` 仍过小，可将 `command_proj_weight` 提至 0.2。  
+### 分析结论
+- 成功率不上升的主要原因是策略几乎不动（速度小、进度小）、碰撞率高、PPO 更新幅度很小。
+- 奖励尺度与观测尺度不匹配会放大价值误差并抑制策略更新。
+- 初始位置过近障碍/边界会导致早期碰撞占比过高。
 
-## 20260116-194430 现象与日志结论
-- success 仍在 ~1%（前10轮 0.0117，后10轮 0.0137），collision ~0.66，timeout 为 0。
-- proj 仍接近 0，angle 约 1.56（接近 90°），说明“朝目标对齐”仍未学到。
-- progress/goal_dist 基本不变，真实接近目标没有提升。
-- cmd_speed 略升（0.151 → 0.165），但 cmd_zero 仍高（~0.30）；指令小且抖动不减。
-- speed_ratio_active 仍在 ~0.23，说明并非低层跟踪问题，而是高层指令偏弱。
-- PPO 更新仍偏保守：approx_kl 很低、clip_frac 极小，策略更新不足。
-- 结论：策略仍停留在低指令/低推进的局部最优，学习信号不足。
+### 代码变更
+1) 奖励尺度调整（更重视进度、降低避障惩罚、提高速度奖励、降低动作平滑惩罚）
+   - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
+   - `progress_scale: 15 -> 45`
+   - `obstacle_penalty_scale: 1.5 -> 0.6`
+   - `body_speed_scale: 0.2 -> 0.6`
+   - `action_smooth_scale: 0.1 -> 0.03`
+   - `yaw_rate_scale: 0.05 -> 0.02`
+2) 观测尺度归一化（缩放真实距离）
+   - `legged_gym_go2/legged_gym/envs/go2/high_level_navigation_env.py`
+   - `GO2HighLevelCfg.reach_metric_scale = 0.2`
+   - `legged_gym_go2/legged_gym/envs/go2/hierarchical_go2_env.py` 传递配置
+3) 初始采样安全过滤（远离障碍/边界）
+   - `legged_gym_go2/legged_gym/envs/go2/go2_env.py`
+4) PPO 超参数调整（增强探索与更新幅度）
+   - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
+   - `learning_rate: 3e-5 -> 1e-4`
+   - `entropy_coef: 0.001 -> 0.003`
+5) 文档同步
+   - `AGENTS.md`
 
-### 修改代码与方向调整
-- 提高 PPO 更新强度 + 强化方向指令奖励：
-  - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
-    - `command_proj_weight` 0.15 → 0.25
-    - `learning_rate` 2e-5 → 3e-5
-    - `clip_param` 0.08 → 0.1
-    - `desired_kl` 0.02 → 0.03
-    - `max_lr` 5e-5 → 8e-5
+### 下一步建议（对比诊断指标）
+- 奖励尺度调整后：观察 `avg_reward`、`progress`、`cmd_speed`、`body_speed` 上升，`collision` 下降。
+- 观测缩放后：观察 `value_loss`、`value_clip_frac` 下降，`approx_kl`/`clip_frac` 恢复到合理区间。
+- 采样过滤后：观察 `collision`、`boundary_collision_rate`、`obstacle_collision_rate` 下降，`ep_len_mean` 上升。
+- PPO 调整后：观察 `approx_kl`、`policy_loss` 不再长期接近 0，`action_std` 有适度上升。
 
-### 下一步建议
-1) 训练 50–100 iter，观察 `approx_kl` 是否回到 0.005–0.02，`proj` 是否显著上升。  
-2) 若 `proj` 仍接近 0，可进一步提高 `command_proj_weight`（0.3）。  
-3) 若更新仍过于保守，可继续上调 `learning_rate` 或 `clip_param`（小幅）。  
+---
 
-## 20260116-204129 现象与日志结论
-- success 仍在 ~1%，collision ~0.66，timeout 为 0。
-- proj 上升（0.002 → 0.035），但 angle 仍接近 90°；progress/goal_dist 仍基本不动。
-- cmd_speed 上升（0.152 → 0.218），cmd_zero 明显下降，但 body_speed 仍 ~0.042。
-- speed_ratio_active 下降（~0.24 → ~0.20），指令更激进但推进效率更低。
-- PPO 更新更强（approx_kl 上升、ratio_max/logp_diff_max 上升），但仍未转化为成功率。
-- 结论：指令更大但真实推进无提升，成功率仍不上升。
+## 20260117-150000
+### 分析结论
+- 本轮日志显示成功率长期停留在 ~1% 且碰撞率 ~60%，策略几乎不产生有效前进：`proj≈0`、`cmd_speed≈0.16`、`body_speed≈0.04`。
+- PPO 更新幅度过小（`approx_kl`、`clip_frac`、`policy_loss` 长期接近 0），策略学习几乎停滞。
+- 价值误差偏大（`value_loss`、`value_clip_frac` 较高），回报尺度对价值学习不友好。
+- 终止主要来自碰撞，说明避障策略未成型，奖励与终止口径不一致会进一步削弱学习信号。
 
-### 修改代码与方向调整
-- 强化真实推进奖励、抑制“只下指令”：
-  - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
-    - `goal_progress_scale` 35.0 → 45.0
-    - 新增 `body_speed_scale = 0.1`
-  - `legged_gym_go2/legged_gym/scripts/train_reward_shaping.py`
-    - 增加 `body_speed` 正奖励项（`body_speed_scale * body_speed`）
+### 代码变更（按优先级）
+1) 奖励与终止危险距离口径统一
+   - `legged_gym_go2/legged_gym/envs/go2/hierarchical_go2_env.py`
+   - 奖励使用真实 `min_hazard_distance`，雷达估计仅用于观测/对比日志。
+   - 新增 `min_hazard_distance_est` 日志字段。
+   - 增加 `command_speed_scale` 进入奖励项。
+2) 强化移动激励
+   - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
+   - `alignment_scale: 1.0 -> 2.0`
+   - `body_speed_scale: 0.6 -> 1.0`
+   - `command_speed_scale: 0.3`（新增）
+   - `idle_penalty_scale: 0.1 -> 0.3`
+3) 放大 PPO 更新幅度
+   - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
+   - `learning_rate: 1e-4 -> 2e-4`
+   - `max_lr: 8e-5 -> 3e-4`
+   - `clip_param: 0.1 -> 0.2`
+   - `value_clip_param: 0.1 -> 0.2`
+   - `max_grad_norm: 0.6 -> 1.0`
+4) 降低碰撞惩罚尺度
+   - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
+   - `collision_penalty: 100 -> 50`
 
-### 下一步建议
-1) 训练 50–100 iter，观察 `body_speed` 是否上升，`progress/goal_dist` 是否改善。  
-2) 若仍无提升，可继续提高 `body_speed_scale`（小幅递增）。  
-3) 若碰撞明显增加，可适度回调 `goal_progress_scale`。  
+### 下一步建议（对比诊断指标）
+- 统一危险口径后：观察 `collision` 下降、`obstacle` 与 `min_hazard` 更一致。
+- 强化移动激励后：观察 `cmd_speed`、`body_speed`、`proj` 上升，`cmd_zero` 下降。
+- PPO 调整后：观察 `approx_kl` 回到 0.01–0.03，`clip_frac` 0.05–0.15，`policy_loss` 不再接近 0。
+- 降低碰撞惩罚后：观察 `value_loss`、`value_clip_frac` 下降，`Vmean/Rmean` 绝对值减小。
 
-## 20260116-214034 现象与日志结论
-- success 仍在 ~1%，collision ~0.66，timeout 为 0。
-- proj 上升（0.002 → 0.027），但 angle 仍接近 90°；progress/goal_dist 仍基本不动。
-- cmd_speed 上升（0.152 → 0.198），cmd_zero 明显下降，但 body_speed 仍 ~0.042。
-- speed_ratio_active 下降（~0.24 → ~0.21），指令更激进但推进效率更低。
-- PPO 更新更强（approx_kl 上升、ratio_max/logp_diff_max 上升），但未转化为成功率。
-- 结论：指令更大但真实推进无提升，成功率仍不上升。
+---
 
-### 修改代码与方向调整
-- 强化真实推进奖励并加入轻微抖动惩罚：
-  - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
-    - `goal_progress_scale` 45.0 → 60.0
-    - `body_speed_scale` 0.1 → 0.2
-    - 新增 `cmd_delta_scale = 0.05`
-  - `legged_gym_go2/legged_gym/scripts/train_reward_shaping.py`
-    - `_compute_reward_shaping` 增加 `prev_command_xy` 输入
-    - 新增 `cmd_delta` 惩罚项（`cmd_delta_scale * ||cmd_t - cmd_{t-1}||`）
-    - 组件记录新增 `cmd_delta`
+## 20260117-153500
+### 分析结论
+- 新日志显示 `cmd_speed` 上升但 `body_speed` 仍约 0.04，`speed_ratio` 下降，说明“指令变大但实际不动”，策略仍难有效前进。
+- `proj≈0`、`progress≈0.005` 与 `goal_dist` 基本不降，成功率仍停留在 ~1%。
+- PPO 更新仍偏小：`approx_kl≈0.0026`、`clip_frac≈0.02`，策略更新不足。
+- 奖励惩罚主导，`avg_reward` 仍为负。
 
-### 下一步建议
-1) 训练 50–100 iter，观察 `body_speed` 是否上升、`progress/goal_dist` 是否改善。  
-2) 若 `cmd_delta` 未下降，可继续上调 `cmd_delta_scale`（小幅）。  
-3) 若推进仍弱，可进一步提高 `body_speed_scale` 或 `goal_progress_scale`。  
+### 代码变更（按优先级）
+1) 用“指令方向对齐”替代“指令速度奖励”
+   - `legged_gym_go2/legged_gym/envs/go2/hierarchical_go2_env.py`
+   - 新增 `command_alignment`，奖励项使用 `command_alignment_scale`。
+   - 日志新增 `cmd_align` 以验证指令是否朝目标。
+2) 增加动作保持与平滑
+   - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
+   - `high_level_action_repeat: 5 -> 10`
+   - `action_smooth_scale: 0.03 -> 0.08`
+3) 提升 PPO 更新幅度
+   - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
+   - `learning_rate: 2e-4 -> 3e-4`
+   - `max_lr: 3e-4 -> 5e-4`
+   - `desired_kl: 0.02 -> 0.01`
+4) 扩大高层动作范围（不改映射）
+   - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
+   - `action_scale: [1.0, 1.0, 1.0] -> [1.3, 1.0, 1.0]`
+5) 日志增加 `cmd_align`
+   - `legged_gym_go2/legged_gym/scripts/train_reward_shaping.py`
 
-## 20260116-223756 现象与日志结论
-- success/reach 均值约 1.1%（最大 3.3%），collision ~0.66，timeout 为 0；成功率仍无上升。
-- avg_reward 改善（-0.195 → -0.076）、proj 上升（0.002 → 0.097），但 angle ~1.56、progress 近 0、goal_dist 基本不变，真实接近目标没有提升。
-- cmd_speed 大幅上升（0.15 → 0.44）、cmd_zero 降至 0、cmd_std_* 与 action_sat 上升，指令更激进。
-- body_speed 始终 ~0.042、speed_ratio_active 下降（0.24 → 0.11），cmd_speed 与 body_speed 相关性极低，指令难以转化为真实速度。
-- PPO 更新不稳定：approx_kl/ratio_max/logp_diff_max/grad_norm 多次尖峰，Vstd/Rstd 膨胀。
-- 结论：策略主要在“放大指令/奖励投影”上优化，真实推进不足；命令-运动脱钩 + 更新不稳定导致成功率不上升。
+### 下一步建议（对比诊断指标）
+- 观察 `cmd_align` 与 `proj`：若 `cmd_align` 升而 `proj` 仍低，说明低层跟踪或动作保持仍不足。
+- 观察 `body_speed` 与 `speed_ratio`：若依旧低，优先检查低层速度跟踪与高层动作频率。
+- 观察 `approx_kl`、`clip_frac`：应接近目标区间（`approx_kl≈0.01`）。
 
-### 下一步建议
-1) 记录 per-step `cmd_speed` vs `body_speed`（含执行通道），确认命令-运动脱钩的具体链路是否存在控制/裁剪问题。  
-2) 奖励进一步绑定真实推进（如 `body_speed` 投影或 `goal_progress` 权重），并对过激指令/饱和动作加入抑制项以避免 reward hacking。  
-3) 引入 KL 早停或更严格的梯度裁剪，降低 `ratio_max/logp_diff_max` 尖峰，提升更新稳定性。  
+---
+
+## 20260117-162500
+### 分析结论
+- 新日志显示超时占比高（约 70%），成功率仍在 0.3%~0.7% 区间。
+- `cmd_align` 仍为 0（记录异常），导致无法验证“指令方向奖励”是否生效。
+- `cmd_speed` 上升但 `body_speed` 仍约 0.036，实际前进几乎没有变化。
+- 自适应 PPO 出现学习率下降（`lr` 到 5e-6），更新可能被抑制。
+
+### 代码变更（按优先级）
+1) 修复 `cmd_align` 记录
+   - `legged_gym_go2/legged_gym/envs/go2/hierarchical_go2_env.py`
+   - 将 `command_alignment` 写入 `infos`，日志可直接观测指令方向是否对齐目标。
+2) 延长 episode 时长以降低超时
+   - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
+   - `episode_length_s: 20 -> 40`
+3) 增加超时/怠速惩罚
+   - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
+   - `idle_speed_threshold: 0.05 -> 0.1`
+   - `idle_penalty_scale: 0.3 -> 0.6`
+   - `timeout_penalty: 0 -> 10`
+4) PPO 自适应保持但放宽 KL 目标
+   - `legged_gym_go2/legged_gym/envs/go2/go2_config.py`
+   - `desired_kl: 0.01 -> 0.03`
+
+### 下一步建议（对比诊断指标）
+- 观察 `cmd_align` 是否明显上升；若仍为 0，需排查指令与目标方向计算/日志写入链路。
+- 观察 `timeout` 是否明显下降；若仍高，考虑进一步延长 `episode_length_s` 或降低 `high_level_action_repeat`。
+- 观察 `body_speed` 与 `speed_ratio` 是否上升；若仍低，需检查低层速度跟踪或高层动作幅度。
+- 观察 `lr` 是否稳定在合理区间；若仍频繁掉到 `min_lr`，考虑提高 `desired_kl` 或减小更新步长。

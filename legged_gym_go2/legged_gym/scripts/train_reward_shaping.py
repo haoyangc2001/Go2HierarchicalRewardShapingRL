@@ -3,155 +3,22 @@ import os
 import time
 import math
 from datetime import datetime
-from typing import Tuple
 
 import isaacgym
 import torch
 
 from legged_gym.envs.go2.go2_config import GO2HighLevelCfg, GO2HighLevelCfgPPO
-from legged_gym.utils.hierarchical_env_utils import (
-    HierarchicalVecEnv,
-    create_env,
-)
+from legged_gym.utils.hierarchical_env_utils import create_env
 from legged_gym.utils import get_args
 from legged_gym.utils.helpers import class_to_dict, update_cfg_from_args
 from rsl_rl.algorithms.ppo import PPO
 from rsl_rl.modules import ActorCritic
 
 
-# 计算奖励整形并生成到达/安全标记。
-def _compute_reward_shaping(
-    reach_metric: torch.Tensor,  # 到目标的距离（当前步）。
-    prev_goal_dist: torch.Tensor,  # 上一步到目标的距离。
-    min_hazard_distance: torch.Tensor,  # 到最近危险区域表面的距离。
-    velocity_commands: torch.Tensor,  # 当前速度命令（用于记录 cmd_speed）。
-    prev_command_xy: torch.Tensor,  # 上一步平面速度命令（用于抖动惩罚）。
-    base_lin_vel_body: torch.Tensor,  # 当前机体线速度（用于实际运动奖励）。
-    target_dir_body: torch.Tensor,  # 目标方向（机体坐标系，单位向量）。
-    time_outs: torch.Tensor,  # 超时终止标记。
-    reward_cfg,  # 奖励配置。
-    rewards_ext,  # 奖励扩展配置。
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
-    # 参考环境的奖励定义：终止给大信号，否则用动作和最近障碍距离。
-    goal_reached_dist = float(
-        getattr(reward_cfg, "goal_reached_dist", rewards_ext.target_sphere_radius)
-    )
-    collision_dist = float(getattr(reward_cfg, "collision_dist", 0.35))
-    obstacle_avoid_dist = float(getattr(reward_cfg, "obstacle_avoid_dist", 1.0))
-    forward_scale = float(getattr(reward_cfg, "forward_reward_scale", 0.5))
-    yaw_scale = float(getattr(reward_cfg, "yaw_penalty_scale", 0.5))
-    obstacle_scale = float(getattr(reward_cfg, "obstacle_penalty_scale", 0.5))
-    progress_scale = float(getattr(reward_cfg, "goal_progress_scale", 1.0))
-    body_speed_scale = float(getattr(reward_cfg, "body_speed_scale", 0.0))
-    cmd_delta_scale = float(getattr(reward_cfg, "cmd_delta_scale", 0.0))
-
-    # 终止分类：collision / success / time_out。
-    reached = reach_metric <= goal_reached_dist
-    collision = min_hazard_distance < collision_dist
-    terminated = reached | collision
-    truncated = time_outs & (~terminated)
-
-    # 基础奖励项：使用真实速度朝目标方向投影，避免仅靠指令刷分。
-    # 公式: forward_scale * dot(v_xy, target_dir_body)
-    #     - yaw_scale * angle_error(v_dir, target_dir_body) * I[|v_xy| > 1e-3]
-    #     - obstacle_scale * r3(min_hazard_distance)
-    min_laser = torch.clamp(min_hazard_distance, min=0.0)
-    r3 = torch.clamp((obstacle_avoid_dist - min_laser) / obstacle_avoid_dist, min=0.0)
-    target_dir = target_dir_body / target_dir_body.norm(dim=1, keepdim=True).clamp_min(1e-6)
-    command_xy = velocity_commands[:, :2]
-    command_speed = torch.norm(command_xy, dim=1)
-    command_dir = command_xy / command_speed.unsqueeze(1).clamp_min(1e-6)
-    body_vel_xy = base_lin_vel_body[:, :2]
-    body_speed = torch.norm(body_vel_xy, dim=1)
-    body_dir = body_vel_xy / body_speed.unsqueeze(1).clamp_min(1e-6)
-    body_proj = torch.sum(body_vel_xy * target_dir, dim=1)
-    command_proj = torch.sum(command_xy * target_dir, dim=1)
-    command_proj_weight = float(getattr(reward_cfg, "command_proj_weight", 0.3))
-    target_proj = (1.0 - command_proj_weight) * body_proj + command_proj_weight * command_proj
-    cos_angle = torch.sum(body_dir * target_dir, dim=1).clamp(-1.0, 1.0)
-    angle_error = torch.acos(cos_angle)
-    angle_mask = (body_speed > 0.1).float()
-    reward = forward_scale * target_proj - yaw_scale * angle_error * angle_mask - obstacle_scale * r3
-    if body_speed_scale > 0.0:
-        reward = reward + body_speed_scale * body_speed
-    speed_mismatch_scale = float(getattr(reward_cfg, "speed_mismatch_scale", 0.0))
-    if speed_mismatch_scale > 0.0:
-        speed_mismatch = (command_speed - body_speed).clamp(min=0.0)
-        mismatch_mask = (command_speed > 0.1).float()
-        reward = reward - speed_mismatch_scale * speed_mismatch * mismatch_mask
-    else:
-        speed_mismatch = torch.zeros_like(command_speed)
-    cmd_delta = torch.zeros_like(command_speed)
-    if cmd_delta_scale > 0.0:
-        cmd_delta = torch.norm(command_xy - prev_command_xy, dim=1)
-        reward = reward - cmd_delta_scale * cmd_delta
-
-    # 目标进度奖励：鼓励距离减少，终止步不计入进度。
-    progress_raw = prev_goal_dist - reach_metric
-    progress_mask = (~(terminated | truncated)).float()
-    progress = progress_raw * progress_mask
-    progress_abs = progress_raw.abs() * progress_mask
-    reward = reward + progress_scale * progress
-
-    # 终止奖励：到达/碰撞/超时。
-    reward = torch.where(
-        reached,
-        reward + float(getattr(reward_cfg, "success_reward", 100.0)),
-        reward,
-    )
-    reward = torch.where(
-        collision,
-        reward - float(getattr(reward_cfg, "collision_penalty", 100.0)),
-        reward,
-    )
-    reward = torch.where(
-        truncated,
-        reward - float(getattr(reward_cfg, "timeout_penalty", 0.0)),
-        reward,
-    )
-
-    reward_scale = float(getattr(reward_cfg, "reward_scale", 1.0))
-    reward = reward * reward_scale
-    reward_clip = float(getattr(reward_cfg, "reward_clip", 0.0))
-    if reward_clip > 0.0:
-        clipped_reward = torch.clamp(reward, -reward_clip, reward_clip)
-        reward_clip_frac = (clipped_reward != reward).float()
-        reward = clipped_reward
-    else:
-        reward_clip_frac = torch.zeros_like(reward)
-
-    components = {
-        "target_proj": target_proj,
-        "angle_error": angle_error,
-        "obstacle_penalty": r3,
-        "progress": progress,
-        "progress_raw": progress_raw,
-        "progress_abs": progress_abs,
-        "command_speed": command_speed,
-        "speed_mismatch": speed_mismatch,
-        "reward_clip_frac": reward_clip_frac,
-        "cmd_delta": cmd_delta,
-    }
-
-    return reward, reached, collision, terminated, truncated, components
-
-
-# 从环境信息中提取 PPO 需要的字段。
-def _build_ppo_infos(
-    infos: dict  # 环境 step 返回的 infos 字典。
-) -> dict:  # 返回整理后的 PPO infos 字典。
-    # 函数作用: 只保留 PPO 训练需要的超时标记字段。
-    # 输入 infos: 环境返回的信息字典。
-    # 输出: 仅包含 PPO 关注字段的字典。
-    ppo_infos = {}  # 初始化返回字典。
-    # 确保 infos 为字典类型。
-    if isinstance(infos, dict):
-        # 从 infos 中提取 base_infos 子字典。
-        base_infos = infos.get("base_infos")
-        # 若 base_infos 合法且包含 time_outs 字段, 则拷贝给 PPO。
-        if isinstance(base_infos, dict) and "time_outs" in base_infos:
-            ppo_infos["time_outs"] = base_infos["time_outs"]
-    # 返回整理后的 PPO infos。
+def _build_ppo_infos(infos: dict) -> dict:
+    ppo_infos = {}
+    if isinstance(infos, dict) and "time_outs" in infos:
+        ppo_infos["time_outs"] = infos["time_outs"]
     return ppo_infos
 
 
@@ -241,7 +108,6 @@ def train_reward_shaping(args) -> None:
 
     if log_dir is None:
         log_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
         base_log_root = "/home/caohy/repositories/MCRA_RL/logs"
         log_dir = os.path.join(base_log_root, train_cfg.runner.experiment_name, log_timestamp)
         os.makedirs(log_dir, exist_ok=True)
@@ -254,7 +120,6 @@ def train_reward_shaping(args) -> None:
     print(f"training log file: {log_file}")
 
     reward_cfg = env_cfg.reward_shaping
-    rewards_ext = env.env.base_env.cfg.rewards_ext
 
     print("Reward shaping PPO training")
     print(f"  envs       : {env.num_envs}")
@@ -264,11 +129,8 @@ def train_reward_shaping(args) -> None:
     print(f"  device     : {device}")
     print(f"  log dir    : {log_dir}")
 
-    obs, g_vals, h_vals = env.reset()
+    obs = env.reset()
     obs = obs.to(device)
-    g_vals = g_vals.to(device)
-    h_vals = h_vals.to(device)
-    prev_goal_dist = env.env.base_env.reach_metric.clone().to(device)
     horizon = train_cfg.algorithm.num_steps_per_env
 
     max_iterations = train_cfg.runner.max_iterations
@@ -297,10 +159,9 @@ def train_reward_shaping(args) -> None:
         hazard_p90_sum = 0.0
         action_sat_sum = 0.0
         proj_sum = 0.0
-        angle_error_sum = 0.0
-        obstacle_penalty_sum = 0.0
+        cmd_align_sum = 0.0
         progress_sum = 0.0
-        progress_abs_sum = 0.0
+        obstacle_penalty_sum = 0.0
         command_speed_sum = 0.0
         body_speed_sum = 0.0
         speed_ratio_sum = 0.0
@@ -309,108 +170,70 @@ def train_reward_shaping(args) -> None:
         cmd_delta_sum = 0.0
         cmd_delta_count = 0
         cmd_zero_frac_sum = 0.0
-        cmd_vx_std_sum = 0.0
-        cmd_vy_std_sum = 0.0
-        cmd_vyaw_std_sum = 0.0
-        cmd_speed_std_sum = 0.0
         reward_clip_sum = 0.0
         boundary_violation_sum = 0.0
-        boundary_collision_sum = 0.0
-        obstacle_collision_sum = 0.0
         episode_len_sum = 0.0
         episode_len_sq_sum = 0.0
         episode_len_count = 0.0
         done_frac_sum = 0.0
-        start_goal_dist = prev_goal_dist.mean().item()
 
-        prev_commands = None
+        if hasattr(env, "env") and hasattr(env.env, "base_env"):
+            start_goal_dist = env.env.base_env.reach_metric.mean().item()
+        else:
+            start_goal_dist = 0.0
+
         for step in range(horizon):
             actions = alg.act(obs, obs)
-            next_obs, next_g, next_h, dones, infos = env.step(actions)
+            next_obs, rewards, dones, infos = env.step(actions)
 
             next_obs = next_obs.to(device)
-            next_g = next_g.to(device)
-            next_h = next_h.to(device)
+            rewards = rewards.to(device)
             dones = dones.to(device)
 
-            # 基于危险距离与进度构造奖励（包含门控与终止项）。
-            reach_metric = infos["reach_metric"].to(device)
+            time_outs = infos.get("time_outs", torch.zeros_like(dones, dtype=torch.bool))
+            reached = infos.get("reached", torch.zeros_like(dones, dtype=torch.bool))
+            target_distance = infos.get("target_distance", torch.zeros_like(rewards))
             min_hazard_distance = infos.get(
-                "min_hazard_distance", env.env.base_env.min_hazard_distance
-            ).to(device)
-            time_outs = torch.zeros_like(reach_metric, dtype=torch.bool)
-            base_infos = infos.get("base_infos", {}) if isinstance(infos, dict) else {}
-            if isinstance(base_infos, dict) and "time_outs" in base_infos:
-                time_outs = base_infos["time_outs"].to(device).bool()
-
-            # 奖励使用真实速度投影，并用高层下发的目标指令作为命令基准。
-            velocity_commands = infos.get("desired_commands")
-            if velocity_commands is None:
-                velocity_commands = env.env.base_env.commands[:, :3]
-            velocity_commands = velocity_commands.to(device)
-            base_lin_vel_body = infos.get("base_lin_vel", env.env.base_env.base_lin_vel).to(device)
-            target_dir_body = next_obs[:, 6:8].to(device)
-
-            prev_command_xy = (
-                prev_commands[:, :2] if prev_commands is not None else velocity_commands[:, :2]
+                "min_hazard_distance_true",
+                infos.get("min_hazard_distance", torch.zeros_like(rewards)),
             )
-            reward, reached, collision, _terminated, _truncated, components = _compute_reward_shaping(
-                reach_metric=reach_metric,
-                prev_goal_dist=prev_goal_dist,
-                min_hazard_distance=min_hazard_distance,
-                velocity_commands=velocity_commands,
-                prev_command_xy=prev_command_xy,
-                base_lin_vel_body=base_lin_vel_body,
-                target_dir_body=target_dir_body,
-                time_outs=time_outs,
-                reward_cfg=reward_cfg,
-                rewards_ext=rewards_ext,
-            )
+            progress = infos.get("progress", torch.zeros_like(rewards))
+            alignment = infos.get("alignment", torch.zeros_like(rewards))
+            command_alignment = infos.get("command_alignment", torch.zeros_like(rewards))
+            obstacle_penalty = infos.get("obstacle_penalty", torch.zeros_like(rewards))
+            command_speed = infos.get("command_speed", torch.zeros_like(rewards))
+            body_speed = infos.get("body_speed", torch.zeros_like(rewards))
+            command_delta = infos.get("command_delta", torch.zeros_like(rewards))
+            reward_clip_frac = infos.get("reward_clip_frac", torch.zeros_like(rewards))
+            boundary_distance = infos.get("boundary_distance")
+            obstacle_surface_distance = infos.get("obstacle_surface_distance")
+
+            hazard_collision = min_hazard_distance < float(reward_cfg.collision_dist)
 
             done_flags = dones
-            if getattr(reward_cfg, "terminate_on_safety_violation", True):
-                done_flags = torch.logical_or(done_flags, collision)
-            if getattr(reward_cfg, "terminate_on_success", True):
-                done_flags = torch.logical_or(done_flags, reached)
-
-            boundary_distance = infos.get(
-                "boundary_distance", env.env.base_env.boundary_distance
-            ).to(device)
-            obstacle_surface_distance = infos.get(
-                "obstacle_surface_distance", env.env.base_env.obstacle_surface_distance
-            ).to(device)
-            hazard_is_boundary = boundary_distance <= obstacle_surface_distance
-            boundary_collision = collision & hazard_is_boundary
-            obstacle_collision = collision & ~hazard_is_boundary
-            boundary_violation = boundary_distance < 0.0
-
             episode_steps += 1
             episode_reached |= reached
-            episode_collision |= collision
+            episode_collision |= hazard_collision
 
-            done_envs = done_flags
-            if done_envs.any():
-                # 成功率：先到达目标且期间未发生碰撞。
-                success_mask = done_envs & episode_reached & ~episode_collision
+            if done_flags.any():
+                success_mask = done_flags & episode_reached & ~episode_collision
                 success_count += success_mask.sum().item()
-                reached_count += (done_envs & reached).sum().item()
-                collision_count += (done_envs & collision).sum().item()
-                boundary_collision_count += (done_envs & boundary_collision).sum().item()
-                obstacle_collision_count += (done_envs & obstacle_collision).sum().item()
-                timeout_count += (done_envs & _truncated).sum().item()
-                episode_count += done_envs.sum().item()
-                ep_lengths = episode_steps[done_envs].float()
+                reached_count += (done_flags & reached).sum().item()
+                collision_count += (done_flags & hazard_collision).sum().item()
+                timeout_count += (done_flags & time_outs).sum().item()
+                episode_count += done_flags.sum().item()
+                ep_lengths = episode_steps[done_flags].float()
                 episode_len_sum += ep_lengths.sum().item()
                 episode_len_sq_sum += (ep_lengths ** 2).sum().item()
-                episode_len_count += done_envs.sum().item()
+                episode_len_count += done_flags.sum().item()
                 if success_mask.any():
                     success_steps_sum += episode_steps[success_mask].float().sum().item()
-                episode_collision[done_envs] = False
-                episode_reached[done_envs] = False
-                episode_steps[done_envs] = 0
+                episode_collision[done_flags] = False
+                episode_reached[done_flags] = False
+                episode_steps[done_flags] = 0
 
-            reward_sum += reward.mean().item()
-            goal_dist_sum += reach_metric.mean().item()
+            reward_sum += rewards.mean().item()
+            goal_dist_sum += target_distance.mean().item()
             min_hazard_sum += min_hazard_distance.mean().item()
             hazard_quantiles = torch.quantile(
                 min_hazard_distance,
@@ -420,44 +243,36 @@ def train_reward_shaping(args) -> None:
             hazard_p50_sum += hazard_quantiles[1].item()
             hazard_p90_sum += hazard_quantiles[2].item()
             action_sat_sum += (actions.abs() > 0.95).float().mean().item()
-            proj_sum += components["target_proj"].mean().item()
-            angle_error_sum += components["angle_error"].mean().item()
-            obstacle_penalty_sum += components["obstacle_penalty"].mean().item()
-            progress_sum += components["progress"].mean().item()
-            progress_abs_sum += components["progress_abs"].mean().item()
-            command_speed_sum += components["command_speed"].mean().item()
-            body_speed = torch.norm(base_lin_vel_body[:, :2], dim=1)
+            proj_sum += alignment.mean().item()
+            cmd_align_sum += command_alignment.mean().item()
+            progress_sum += progress.mean().item()
+            obstacle_penalty_sum += obstacle_penalty.mean().item()
+            command_speed_sum += command_speed.mean().item()
             body_speed_sum += body_speed.mean().item()
-            speed_ratio = body_speed / components["command_speed"].clamp_min(1e-6)
+            speed_ratio = body_speed / command_speed.clamp_min(1e-6)
             speed_ratio_sum += speed_ratio.mean().item()
-            active_mask = components["command_speed"] > 0.1
+            active_mask = command_speed > 0.1
             if active_mask.any():
                 speed_ratio_active_sum += speed_ratio[active_mask].mean().item()
                 speed_ratio_active_count += 1
-            if prev_commands is not None:
-                cmd_delta = torch.norm(velocity_commands - prev_commands, dim=1)
-                cmd_delta_sum += cmd_delta.mean().item()
-                cmd_delta_count += 1
-            prev_commands = velocity_commands.clone()
-            cmd_zero_frac_sum += (components["command_speed"] < 0.1).float().mean().item()
-            cmd_std = velocity_commands.std(dim=0)
-            cmd_vx_std_sum += cmd_std[0].item()
-            cmd_vy_std_sum += cmd_std[1].item()
-            cmd_vyaw_std_sum += cmd_std[2].item()
-            cmd_speed_std_sum += components["command_speed"].std().item()
-            reward_clip_sum += components["reward_clip_frac"].mean().item()
+            cmd_delta_sum += command_delta.mean().item()
+            cmd_delta_count += 1
+            cmd_zero_frac_sum += (command_speed < 0.1).float().mean().item()
+            reward_clip_sum += reward_clip_frac.mean().item()
             done_frac_sum += done_flags.float().mean().item()
 
-            boundary_violation_sum += boundary_violation.float().mean().item()
-            boundary_collision_sum += boundary_collision.float().mean().item()
-            obstacle_collision_sum += obstacle_collision.float().mean().item()
-            alg.process_env_step(reward, done_flags, _build_ppo_infos(infos))
+            if boundary_distance is not None and obstacle_surface_distance is not None:
+                hazard_is_boundary = boundary_distance <= obstacle_surface_distance
+                boundary_collision = hazard_collision & hazard_is_boundary
+                obstacle_collision = hazard_collision & ~hazard_is_boundary
+                boundary_violation = boundary_distance < 0.0
+                boundary_violation_sum += boundary_violation.float().mean().item()
+                boundary_collision_count += (done_flags & boundary_collision).sum().item()
+                obstacle_collision_count += (done_flags & obstacle_collision).sum().item()
+
+            alg.process_env_step(rewards, done_flags, _build_ppo_infos(infos))
 
             obs = next_obs
-            g_vals = next_g
-            h_vals = next_h
-            reach_metric_post = infos.get("reach_metric_post", reach_metric).to(device)
-            prev_goal_dist = torch.where(done_flags, reach_metric_post, reach_metric).clone()
 
         alg.compute_returns(obs)
         values = alg.storage.values
@@ -485,10 +300,9 @@ def train_reward_shaping(args) -> None:
         avg_min_hazard = min_hazard_sum / float(horizon)
         avg_action_sat = action_sat_sum / float(horizon)
         avg_proj = proj_sum / float(horizon)
-        avg_angle_error = angle_error_sum / float(horizon)
-        avg_obstacle_penalty = obstacle_penalty_sum / float(horizon)
+        avg_cmd_align = cmd_align_sum / float(horizon)
         avg_progress = progress_sum / float(horizon)
-        avg_progress_abs = progress_abs_sum / float(horizon)
+        avg_obstacle_penalty = obstacle_penalty_sum / float(horizon)
         avg_command_speed = command_speed_sum / float(horizon)
         avg_body_speed = body_speed_sum / float(horizon)
         avg_speed_ratio = speed_ratio_sum / float(horizon)
@@ -499,17 +313,11 @@ def train_reward_shaping(args) -> None:
         )
         avg_cmd_delta = cmd_delta_sum / float(cmd_delta_count) if cmd_delta_count > 0 else 0.0
         avg_cmd_zero_frac = cmd_zero_frac_sum / float(horizon)
-        avg_cmd_vx_std = cmd_vx_std_sum / float(horizon)
-        avg_cmd_vy_std = cmd_vy_std_sum / float(horizon)
-        avg_cmd_vyaw_std = cmd_vyaw_std_sum / float(horizon)
-        avg_cmd_speed_std = cmd_speed_std_sum / float(horizon)
         avg_reward_clip = reward_clip_sum / float(horizon)
         avg_hazard_p10 = hazard_p10_sum / float(horizon)
         avg_hazard_p50 = hazard_p50_sum / float(horizon)
         avg_hazard_p90 = hazard_p90_sum / float(horizon)
         avg_boundary_violation = boundary_violation_sum / float(horizon)
-        avg_boundary_collision = boundary_collision_sum / float(horizon)
-        avg_obstacle_collision = obstacle_collision_sum / float(horizon)
         avg_done_frac = done_frac_sum / float(horizon)
         if episode_len_count > 0:
             avg_episode_len = episode_len_sum / episode_len_count
@@ -536,38 +344,28 @@ def train_reward_shaping(args) -> None:
             elapsed = time.time() - interval_start
             entropy = float(update_stats.get("entropy", 0.0))
             lr = float(update_stats.get("lr", 0.0))
-            ratio_mean = float(update_stats.get("ratio_mean", 0.0))
-            ratio_max = float(update_stats.get("ratio_max", 0.0))
-            logp_diff_max = float(update_stats.get("logp_diff_raw_max", 0.0))
-            approx_kl_raw = float(update_stats.get("approx_kl_raw", 0.0))
             grad_norm = float(update_stats.get("grad_norm", 0.0))
             value_clip_frac = float(update_stats.get("value_clip_frac", 0.0))
-            update_steps = int(update_stats.get("update_steps", 0))
-            early_stop = int(bool(update_stats.get("early_stop", False)))
             log_line = (
                 f"iter {iteration + 1:05d} | success {success_rate:.3f} | reach {reach_rate:.3f} | "
                 f"collision {collision_rate:.3f} | boundary_collision_rate {boundary_collision_rate:.3f} | "
                 f"obstacle_collision_rate {obstacle_collision_rate:.3f} | timeout {timeout_rate:.3f} | "
                 f"cost {execution_cost:.1f} | "
-                f"avg_reward {avg_reward:.3f} | proj {avg_proj:.3f} | angle {avg_angle_error:.3f} | "
-                f"progress {avg_progress:.6f} | progress_abs {avg_progress_abs:.6f} | obstacle {avg_obstacle_penalty:.3f} | "
+                f"avg_reward {avg_reward:.3f} | proj {avg_proj:.3f} | cmd_align {avg_cmd_align:.3f} | "
+                f"progress {avg_progress:.6f} | obstacle {avg_obstacle_penalty:.3f} | "
                 f"goal_dist {avg_goal_dist:.3f} | min_hazard {avg_min_hazard:.3f} | "
                 f"cmd_speed {avg_command_speed:.3f} | body_speed {avg_body_speed:.3f} | "
                 f"speed_ratio {avg_speed_ratio:.3f} | speed_ratio_active {avg_speed_ratio_active:.3f} | "
                 f"cmd_delta {avg_cmd_delta:.3f} | "
-                f"cmd_zero {avg_cmd_zero_frac:.3f} | cmd_std_vx {avg_cmd_vx_std:.3f} | "
-                f"cmd_std_vy {avg_cmd_vy_std:.3f} | cmd_std_vyaw {avg_cmd_vyaw_std:.3f} | "
-                f"cmd_speed_std {avg_cmd_speed_std:.3f} | action_sat {avg_action_sat:.3f} | "
+                f"cmd_zero {avg_cmd_zero_frac:.3f} | action_sat {avg_action_sat:.3f} | "
                 f"action_std {action_std:.3f} | policy_loss {policy_loss:.5f} | value_loss {value_loss:.5f} | "
                 f"approx_kl {approx_kl:.5f} | clip_frac {clip_fraction:.3f} | "
-                f"entropy {entropy:.5f} | lr {lr:.6f} | ratio_mean {ratio_mean:.3f} | ratio_max {ratio_max:.3f} | "
-                f"logp_diff_max {logp_diff_max:.3f} | approx_kl_raw {approx_kl_raw:.5f} | grad_norm {grad_norm:.3f} | "
-                f"value_clip_frac {value_clip_frac:.3f} | update_steps {update_steps:d} | early_stop {early_stop:d} | "
+                f"entropy {entropy:.5f} | lr {lr:.6f} | grad_norm {grad_norm:.3f} | "
+                f"value_clip_frac {value_clip_frac:.3f} | "
                 f"Vmean {v_mean:.3f} | Vstd {v_std:.3f} | Rmean {r_mean:.3f} | Rstd {r_std:.3f} | "
                 f"adv_mean {adv_mean:.3f} | adv_std {adv_std:.3f} | reward_clip {avg_reward_clip:.3f} | "
                 f"hazard_p10 {avg_hazard_p10:.3f} | hazard_p50 {avg_hazard_p50:.3f} | hazard_p90 {avg_hazard_p90:.3f} | "
-                f"boundary_violation {avg_boundary_violation:.3f} | boundary_collision {avg_boundary_collision:.3f} | "
-                f"obstacle_collision {avg_obstacle_collision:.3f} | done_frac {avg_done_frac:.3f} | "
+                f"boundary_violation {avg_boundary_violation:.3f} | done_frac {avg_done_frac:.3f} | "
                 f"ep_len_mean {avg_episode_len:.1f} | "
                 f"ep_len_std {std_episode_len:.1f} | init_goal_dist {start_goal_dist:.3f} | "
                 f"elapsed {elapsed:.2f}s | "
@@ -594,11 +392,8 @@ def train_reward_shaping(args) -> None:
             print(f"  saved checkpoint: {save_path}")
 
         if iteration + 1 < max_iterations:
-            obs, g_vals, h_vals = env.reset()
+            obs = env.reset()
             obs = obs.to(device)
-            g_vals = g_vals.to(device)
-            h_vals = h_vals.to(device)
-            prev_goal_dist = env.env.base_env.reach_metric.clone().to(device)
 
     final_path = os.path.join(log_dir, "model_final.pt")
     torch.save(

@@ -1,7 +1,5 @@
 import torch
 import os
-from typing import Optional
-from legged_gym.envs.go2.go2_env import GO2Robot
 from legged_gym.envs.go2.high_level_navigation_env import HighLevelNavigationEnv, HighLevelNavigationConfig
 from legged_gym.utils import task_registry
 from legged_gym.utils.helpers import class_to_dict
@@ -38,6 +36,12 @@ class HierarchicalGO2Env:
                     or getattr(self.cfg.reward_shaping, "terminate_on_success", True)
                 )
             setattr(self.base_env.cfg.rewards_ext, "terminate_on_reach_avoid", terminate_on_reach_avoid)
+        self.reward_cfg = getattr(self.cfg, "reward_shaping", None)
+        if self.reward_cfg is not None and hasattr(self.base_env.cfg, "rewards_ext"):
+            if hasattr(self.reward_cfg, "goal_reached_dist"):
+                self.base_env.cfg.rewards_ext.goal_reached_dist = float(self.reward_cfg.goal_reached_dist)
+            if hasattr(self.reward_cfg, "collision_dist"):
+                self.base_env.cfg.rewards_ext.collision_dist = float(self.reward_cfg.collision_dist)
 
         # Load the low-level locomotion policy
         self.low_level_policy = self._load_low_level_policy()
@@ -53,6 +57,8 @@ class HierarchicalGO2Env:
         self.num_obs = self.high_level_env.num_high_level_obs  # high-level observation dimension
         self.num_actions = self.high_level_env.num_high_level_actions  # high-level action dimension
         self.device = self.base_env.device
+        self.prev_target_distance = None
+        self.prev_commands = None
 
     def _create_base_env(self):
         """Instantiate the original GO2 environment."""
@@ -126,6 +132,12 @@ class HierarchicalGO2Env:
             self.high_level_config.lidar_max_range = self.cfg.lidar_max_range
         if hasattr(self.cfg, "lidar_num_bins"):
             self.high_level_config.lidar_num_bins = self.cfg.lidar_num_bins
+        if hasattr(self.cfg, "target_lidar_num_bins"):
+            self.high_level_config.target_lidar_num_bins = self.cfg.target_lidar_num_bins
+        if hasattr(self.cfg, "target_lidar_max_range"):
+            self.high_level_config.target_lidar_max_range = self.cfg.target_lidar_max_range
+        if hasattr(self.cfg, "reach_metric_scale"):
+            self.high_level_config.reach_metric_scale = self.cfg.reach_metric_scale
         if hasattr(self.cfg, "terrain"):
             terrain_length = getattr(self.cfg.terrain, "terrain_length", None)
             terrain_width = getattr(self.cfg.terrain, "terrain_width", None)
@@ -136,9 +148,13 @@ class HierarchicalGO2Env:
                 )
 
     def reset(self):
-        """Reset the environment and return high-level observations and metrics."""
-        high_level_obs, g_values, h_values = self.high_level_env.reset()
-        return high_level_obs, g_values, h_values
+        """Reset the environment and return high-level observations."""
+        high_level_obs = self.high_level_env.reset()
+        self.prev_target_distance = self.high_level_env.extract_target_distance(high_level_obs).clone()
+        self.prev_commands = torch.zeros(
+            self.num_envs, self.num_actions, device=self.device, dtype=torch.float
+        )
+        return high_level_obs
 
     def step(self, high_level_actions):
         """
@@ -148,8 +164,7 @@ class HierarchicalGO2Env:
             high_level_actions: [num_envs, 3] high-level velocity commands [vx, vy, vyaw]
         Returns:
             observations: [num_envs, num_obs] high-level observations
-            g_values: [num_envs] reach metric values
-            h_values: [num_envs] avoid metric values
+            rewards: [num_envs] reward values
             dones: [num_envs] termination flags
             infos: Additional diagnostic information
         """
@@ -158,13 +173,9 @@ class HierarchicalGO2Env:
         desired_velocity_commands = self.base_env.commands[:, :3].clone()
 
         # 2. Execute the low-level policy multiple times to honor the commands
-        base_obs = None
         base_infos = None
-        avoid_metric = None
-        reach_metric = None
         aggregated_dones = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         done_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        avoid_buf = None
         reach_buf = None
         min_hazard_buf = None
         boundary_buf = None
@@ -178,7 +189,7 @@ class HierarchicalGO2Env:
             with torch.no_grad():
                 low_level_actions = self.low_level_policy(current_base_obs)
 
-            base_obs, privileged_obs, _, step_dones, base_infos, avoid_metric, reach_metric = self.base_env.step(
+            _, _, _, step_dones, base_infos = self.base_env.step(
                 low_level_actions
             )
 
@@ -187,9 +198,9 @@ class HierarchicalGO2Env:
             if isinstance(base_infos, dict) and "time_outs" in base_infos:
                 step_time_outs = base_infos["time_outs"].to(self.device).bool()
 
+            reach_metric = self.base_env.reach_metric
             if reach_buf is None:
                 reach_buf = reach_metric.clone()
-                avoid_buf = avoid_metric.clone()
                 min_hazard_buf = self.base_env.min_hazard_distance.clone()
                 boundary_buf = self.base_env.boundary_distance.clone()
                 obstacle_surface_buf = self.base_env.obstacle_surface_distance.clone()
@@ -198,7 +209,6 @@ class HierarchicalGO2Env:
             else:
                 update_mask = ~done_mask
                 reach_buf = torch.where(update_mask, reach_metric, reach_buf)
-                avoid_buf = torch.where(update_mask, avoid_metric, avoid_buf)
                 min_hazard_buf = torch.where(
                     update_mask, self.base_env.min_hazard_distance, min_hazard_buf
                 )
@@ -218,27 +228,177 @@ class HierarchicalGO2Env:
         self.high_level_env._compute_high_level_observations()
         high_level_obs = self.high_level_env.get_observations()
 
-        # 5. Convert reach/avoid metrics into g/h values
-        g_values, h_values = self.high_level_env.compute_g_h_values(avoid_buf, reach_buf)
+        # 5. Derive distances from lidar observations; use reach_metric for rewards.
+        target_distance_est = self.high_level_env.extract_target_distance(high_level_obs)
+        hazard_distance_est = self.high_level_env.extract_hazard_distance(high_level_obs)
+        reach_metric = reach_buf if reach_buf is not None else self.base_env.reach_metric.clone()
+        min_hazard_true = (
+            min_hazard_buf if min_hazard_buf is not None else self.base_env.min_hazard_distance.clone()
+        )
+        if reach_buf is not None:
+            target_distance_est = torch.where(aggregated_dones, reach_buf, target_distance_est)
+        if min_hazard_buf is not None:
+            hazard_distance_est = torch.where(aggregated_dones, min_hazard_buf, hazard_distance_est)
+
+        hazard_distance_for_reward = min_hazard_true if min_hazard_true is not None else hazard_distance_est
+
+        reset_mask = self.base_env.episode_length_buf == 0
+        reward, done_flags, reached, success, collision, terminated, truncated, components = self._compute_reward(
+            high_level_obs=high_level_obs,
+            desired_commands=desired_velocity_commands,
+            target_distance=reach_metric,
+            hazard_distance=hazard_distance_for_reward,
+            base_dones=aggregated_dones,
+            time_outs=time_outs_buf,
+            reset_mask=reset_mask,
+        )
+
+        # Update history buffers for the next step
+        self.prev_target_distance = reach_metric.detach().clone()
+        self.prev_commands = desired_velocity_commands.detach().clone()
 
         # 6. Assemble info dictionary for logging/debugging
-        base_infos = dict(base_infos) if isinstance(base_infos, dict) else {}
-        base_infos["time_outs"] = time_outs_buf
-        reach_metric_post = self.base_env.reach_metric.clone()
         infos = {
-            'base_infos': base_infos,
-            'avoid_metric': avoid_buf,
-            'reach_metric': reach_buf,
-            'reach_metric_post': reach_metric_post,
-            'min_hazard_distance': min_hazard_buf,
-            'boundary_distance': boundary_buf,
-            'obstacle_surface_distance': obstacle_surface_buf,
-            'base_lin_vel': base_lin_vel_buf,
-            'base_obs': base_obs,
-            'desired_commands': desired_velocity_commands,
+            "time_outs": time_outs_buf,
+            "reached": reached,
+            "success": success,
+            "collision": collision,
+            "terminated": terminated,
+            "truncated": truncated,
+            "target_distance": reach_metric,
+            "target_distance_est": target_distance_est,
+            "reach_metric": reach_metric,
+            "min_hazard_distance": hazard_distance_est,
+            "min_hazard_distance_est": hazard_distance_est,
+            "min_hazard_distance_true": min_hazard_true,
+            "boundary_distance": boundary_buf,
+            "obstacle_surface_distance": obstacle_surface_buf,
+            "base_lin_vel": base_lin_vel_buf,
+            "desired_commands": desired_velocity_commands,
+            "progress": components["progress"],
+            "alignment": components["alignment"],
+            "command_alignment": components["command_alignment"],
+            "obstacle_penalty": components["obstacle_penalty"],
+            "command_speed": components["command_speed"],
+            "body_speed": components["body_speed"],
+            "command_delta": components["command_delta"],
+            "reward_clip_frac": components["reward_clip_frac"],
         }
 
-        return high_level_obs, g_values, h_values, aggregated_dones, infos
+        return high_level_obs, reward, done_flags, infos
+
+    def _compute_reward(
+        self,
+        high_level_obs: torch.Tensor,
+        desired_commands: torch.Tensor,
+        target_distance: torch.Tensor,
+        hazard_distance: torch.Tensor,
+        base_dones: torch.Tensor,
+        time_outs: torch.Tensor,
+        reset_mask: torch.Tensor,
+    ):
+        cfg = self.reward_cfg
+        if self.prev_target_distance is None:
+            self.prev_target_distance = target_distance.detach().clone()
+        if self.prev_commands is None:
+            self.prev_commands = desired_commands.detach().clone()
+        goal_reached_dist = float(getattr(cfg, "goal_reached_dist", 0.3))
+        collision_dist = float(getattr(cfg, "collision_dist", 0.35))
+        obstacle_avoid_dist = float(getattr(cfg, "obstacle_avoid_dist", 1.0))
+        progress_scale = float(getattr(cfg, "progress_scale", 10.0))
+        alignment_scale = float(getattr(cfg, "alignment_scale", 1.0))
+        obstacle_penalty_scale = float(getattr(cfg, "obstacle_penalty_scale", 1.0))
+        yaw_rate_scale = float(getattr(cfg, "yaw_rate_scale", 0.0))
+        action_smooth_scale = float(getattr(cfg, "action_smooth_scale", 0.0))
+        body_speed_scale = float(getattr(cfg, "body_speed_scale", 0.0))
+        command_alignment_scale = float(getattr(cfg, "command_alignment_scale", 0.0))
+        idle_speed = float(getattr(cfg, "idle_speed_threshold", 0.05))
+        idle_dist = float(getattr(cfg, "idle_distance_threshold", 0.5))
+        idle_penalty_scale = float(getattr(cfg, "idle_penalty_scale", 0.0))
+        success_reward = float(getattr(cfg, "success_reward", 100.0))
+        collision_penalty = float(getattr(cfg, "collision_penalty", 100.0))
+        timeout_penalty = float(getattr(cfg, "timeout_penalty", 0.0))
+
+        body_vel_xy = self.high_level_env.extract_body_vel_xy(high_level_obs)
+        body_speed = torch.norm(body_vel_xy, dim=1)
+        target_dir = high_level_obs[:, 6:8]
+        alignment = torch.sum(body_vel_xy * target_dir, dim=1)
+        command_alignment = torch.sum(desired_commands[:, :2] * target_dir, dim=1)
+        yaw_rate = high_level_obs[:, 4] / self.high_level_env.ang_vel_scale
+
+        hazard_penalty = torch.clamp(
+            (obstacle_avoid_dist - hazard_distance) / obstacle_avoid_dist, min=0.0
+        )
+        command_speed = torch.norm(desired_commands[:, :2], dim=1)
+
+        effective_prev_dist = torch.where(reset_mask, target_distance, self.prev_target_distance)
+        progress = effective_prev_dist - target_distance
+        effective_prev_cmd = torch.where(
+            reset_mask.unsqueeze(1), desired_commands, self.prev_commands
+        )
+        command_delta = torch.norm(desired_commands - effective_prev_cmd, dim=1)
+
+        reached = target_distance <= goal_reached_dist
+        hazard_collision = hazard_distance <= collision_dist
+        # Keep done flags aligned with the base environment resets to avoid desyncs.
+        done_flags = base_dones.clone()
+
+        terminated = done_flags & ~time_outs
+        truncated = time_outs & ~terminated
+        failure = terminated & ~reached
+        collision = (hazard_collision | failure) & done_flags
+
+        active_mask = (~done_flags).float()
+        progress = progress * (~(terminated | truncated)).float()
+        alignment = alignment * active_mask
+        command_alignment = command_alignment * active_mask
+        hazard_penalty = hazard_penalty * active_mask
+        body_speed = body_speed * active_mask
+        command_speed = command_speed * active_mask
+        yaw_penalty = torch.abs(yaw_rate) * active_mask
+        command_delta = command_delta * active_mask
+
+        reward = (
+            progress_scale * progress
+            + alignment_scale * alignment
+            + command_alignment_scale * command_alignment
+            - obstacle_penalty_scale * hazard_penalty
+            - yaw_rate_scale * yaw_penalty
+            - action_smooth_scale * command_delta
+        )
+        if body_speed_scale > 0.0:
+            reward = reward + body_speed_scale * body_speed
+        if idle_penalty_scale > 0.0:
+            idle_mask = (body_speed < idle_speed) & (target_distance > idle_dist)
+            reward = reward - idle_penalty_scale * idle_mask.float()
+
+        success = reached & done_flags
+        reward = torch.where(success, reward + success_reward, reward)
+        reward = torch.where(collision, reward - collision_penalty, reward)
+        reward = torch.where(truncated, reward - timeout_penalty, reward)
+
+        reward_scale = float(getattr(cfg, "reward_scale", 1.0))
+        reward = reward * reward_scale
+        reward_clip = float(getattr(cfg, "reward_clip", 0.0))
+        if reward_clip > 0.0:
+            clipped = torch.clamp(reward, -reward_clip, reward_clip)
+            reward_clip_frac = (clipped != reward).float()
+            reward = clipped
+        else:
+            reward_clip_frac = torch.zeros_like(reward)
+
+        components = {
+            "progress": progress,
+            "alignment": alignment,
+            "command_alignment": command_alignment,
+            "obstacle_penalty": hazard_penalty,
+            "command_speed": command_speed,
+            "body_speed": body_speed,
+            "command_delta": command_delta,
+            "reward_clip_frac": reward_clip_frac,
+        }
+
+        return reward, done_flags, reached, success, collision, terminated, truncated, components
 
     def get_observations(self):
         """Return the current high-level observation buffer."""
