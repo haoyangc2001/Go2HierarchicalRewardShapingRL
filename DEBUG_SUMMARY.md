@@ -188,3 +188,21 @@
 - 观察 `timeout` 是否明显下降；若仍高，考虑进一步延长 `episode_length_s` 或降低 `high_level_action_repeat`。
 - 观察 `body_speed` 与 `speed_ratio` 是否上升；若仍低，需检查低层速度跟踪或高层动作幅度。
 - 观察 `lr` 是否稳定在合理区间；若仍频繁掉到 `min_lr`，考虑提高 `desired_kl` 或减小更新步长。
+
+---
+
+## 20260117-181139（本次分析）
+### 分析结论
+- 成功率在迭代 1~166 持续上升至 0.438，之后回落到 0.222，主要由碰撞率持续攀升驱动；超时已明显下降，回落与超时关联较弱。
+- `success` 与 `reach` 全程完全相等，说明成功口径未排除碰撞，指标失真（当前日志里“成功率”实为“到达率”）。
+- PPO 更新出现过大步长：`approx_kl` 持续升高至 2+，同时学习率被自适应压到 `min_lr=5e-6`，更新不稳定且可能反复退化。
+- 价值函数尺度失衡：`value_loss` 持续攀升、`value_clip_frac` 逼近 1，说明 value 更新几乎被裁剪，难以有效拟合回报。
+- 运动侧指标显示速度和对齐已形成（`cmd_speed`/`body_speed`、`proj`/`cmd_align` 上升），但避障不足导致碰撞率继续上升，成功率随之回落。
+
+### 代码变更
+1) 修正成功指标口径（成功必须“到达且未碰撞”）
+   - `legged_gym_go2/legged_gym/envs/go2/hierarchical_go2_env.py`
+   - `success = reached & done_flags & ~collision`
+
+### 下一步建议
+- 复跑 200~300 iter，对比 `success` 与 `reach` 的分离情况、`approx_kl` 的稳定性，以及 `lr` 是否不再长期贴最小值。

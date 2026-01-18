@@ -39,7 +39,13 @@ def parse_log_file(log_file_path):
     data = {
         'iterations': [],
         'success': [],
+        'collision': [],
+        'timeout': [],
         'cost': [],
+        'avg_reward': [],
+        'progress': [],
+        'goal_dist': [],
+        'min_hazard': [],
         'policy_loss': [],
         'value_loss': [],
         'Vmean': [],
@@ -52,7 +58,13 @@ def parse_log_file(log_file_path):
 
     expected_keys = [
         'success',
+        'collision',
+        'timeout',
         'cost',
+        'avg_reward',
+        'progress',
+        'goal_dist',
+        'min_hazard',
         'policy_loss',
         'value_loss',
         'Vmean',
@@ -263,6 +275,19 @@ def plot_multiple_metrics(data, output_dir, log_file_name):
         ax.grid(True, alpha=0.3)
         ax.set_title('Value Function Explained Variance', fontsize=11)
         ax.set_ylim(-0.1, 1.1)
+    else:
+        plotted = False
+        if len(data['goal_dist']) > 0 and not np.all(np.isnan(data['goal_dist'])):
+            ax.plot(iterations, data['goal_dist'], 'b-', linewidth=1.5, label='Goal Distance')
+            plotted = True
+        if len(data['min_hazard']) > 0 and not np.all(np.isnan(data['min_hazard'])):
+            ax.plot(iterations, data['min_hazard'], 'g-', linewidth=1.5, label='Min Hazard Dist')
+            plotted = True
+        if plotted:
+            ax.set_ylabel('Distance (m)', fontsize=10)
+            ax.grid(True, alpha=0.3)
+            ax.set_title('Goal and Hazard Distances', fontsize=11)
+            ax.legend(fontsize=8)
 
     # Plot 6: Advantage Standard Deviation
     ax = axes[2, 1]
@@ -272,6 +297,12 @@ def plot_multiple_metrics(data, output_dir, log_file_name):
         ax.set_xlabel('Iteration', fontsize=10)
         ax.grid(True, alpha=0.3)
         ax.set_title('Advantage Standard Deviation', fontsize=11)
+    elif len(data['avg_reward']) > 0 and not np.all(np.isnan(data['avg_reward'])):
+        ax.plot(iterations, data['avg_reward'], 'orange', linewidth=1.5)
+        ax.set_ylabel('Avg Reward', fontsize=10)
+        ax.set_xlabel('Iteration', fontsize=10)
+        ax.grid(True, alpha=0.3)
+        ax.set_title('Average Reward', fontsize=11)
 
     # Set x-labels for bottom row
     for ax in axes[2, :]:

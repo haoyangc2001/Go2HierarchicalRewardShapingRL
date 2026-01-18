@@ -372,7 +372,7 @@ class HierarchicalGO2Env:
             idle_mask = (body_speed < idle_speed) & (target_distance > idle_dist)
             reward = reward - idle_penalty_scale * idle_mask.float()
 
-        success = reached & done_flags
+        success = reached & done_flags & ~collision
         reward = torch.where(success, reward + success_reward, reward)
         reward = torch.where(collision, reward - collision_penalty, reward)
         reward = torch.where(truncated, reward - timeout_penalty, reward)
