@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 import os
-import time
-import math
 from datetime import datetime
 
 import isaacgym
@@ -108,8 +106,8 @@ def train_reward_shaping(args) -> None:
 
     if log_dir is None:
         log_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        base_log_root = "/home/caohy/repositories/MCRA_RL/logs"
-        log_dir = os.path.join(base_log_root, train_cfg.runner.experiment_name, log_timestamp)
+        base_log_root = "/home/caohy/repositories/Go2HierarchicalRewardShapingRL/logs/high_level_go2_Reward_Shaping"
+        log_dir = os.path.join(base_log_root, log_timestamp)
         os.makedirs(log_dir, exist_ok=True)
         print(f"created new log directory: {log_dir}")
     else:
@@ -136,11 +134,7 @@ def train_reward_shaping(args) -> None:
     max_iterations = train_cfg.runner.max_iterations
     save_interval = train_cfg.runner.save_interval
     success_rate = 0.0
-    interval_start = time.time()
-
     for iteration in range(start_iteration, max_iterations):
-        episode_collision = torch.zeros(env.num_envs, device=device, dtype=torch.bool)
-        episode_reached = torch.zeros(env.num_envs, device=device, dtype=torch.bool)
         episode_steps = torch.zeros(env.num_envs, device=device, dtype=torch.long)
         success_count = 0
         reached_count = 0
@@ -154,37 +148,22 @@ def train_reward_shaping(args) -> None:
         reward_sum = 0.0
         goal_dist_sum = 0.0
         min_hazard_sum = 0.0
-        hazard_p10_sum = 0.0
-        hazard_p50_sum = 0.0
-        hazard_p90_sum = 0.0
-        action_sat_sum = 0.0
-        proj_sum = 0.0
-        cmd_align_sum = 0.0
         progress_sum = 0.0
-        obstacle_penalty_sum = 0.0
-        command_speed_sum = 0.0
-        body_speed_sum = 0.0
-        speed_ratio_sum = 0.0
-        speed_ratio_active_sum = 0.0
-        speed_ratio_active_count = 0
-        cmd_delta_sum = 0.0
-        cmd_delta_count = 0
-        cmd_zero_frac_sum = 0.0
+        safety_penalty_sum = 0.0
+        smooth_penalty_sum = 0.0
         reward_clip_sum = 0.0
-        boundary_violation_sum = 0.0
         episode_len_sum = 0.0
-        episode_len_sq_sum = 0.0
         episode_len_count = 0.0
-        done_frac_sum = 0.0
-
-        if hasattr(env, "env") and hasattr(env.env, "base_env"):
-            start_goal_dist = env.env.base_env.reach_metric.mean().item()
-        else:
-            start_goal_dist = 0.0
 
         for step in range(horizon):
             actions = alg.act(obs, obs)
-            next_obs, rewards, dones, infos = env.step(actions)
+            step_out = env.step(actions)
+            if len(step_out) == 4:
+                next_obs, rewards, dones, infos = step_out
+            elif len(step_out) == 5:
+                next_obs, _, rewards, dones, infos = step_out
+            else:
+                raise ValueError(f"Unexpected env.step return size: {len(step_out)}")
 
             next_obs = next_obs.to(device)
             rewards = rewards.to(device)
@@ -192,81 +171,53 @@ def train_reward_shaping(args) -> None:
 
             time_outs = infos.get("time_outs", torch.zeros_like(dones, dtype=torch.bool))
             reached = infos.get("reached", torch.zeros_like(dones, dtype=torch.bool))
+            success = infos.get("success", torch.zeros_like(dones, dtype=torch.bool))
+            collision = infos.get("collision")
             target_distance = infos.get("target_distance", torch.zeros_like(rewards))
             min_hazard_distance = infos.get(
                 "min_hazard_distance_true",
                 infos.get("min_hazard_distance", torch.zeros_like(rewards)),
             )
             progress = infos.get("progress", torch.zeros_like(rewards))
-            alignment = infos.get("alignment", torch.zeros_like(rewards))
-            command_alignment = infos.get("command_alignment", torch.zeros_like(rewards))
-            obstacle_penalty = infos.get("obstacle_penalty", torch.zeros_like(rewards))
-            command_speed = infos.get("command_speed", torch.zeros_like(rewards))
-            body_speed = infos.get("body_speed", torch.zeros_like(rewards))
-            command_delta = infos.get("command_delta", torch.zeros_like(rewards))
+            safety_penalty = infos.get("safety_penalty", torch.zeros_like(rewards))
+            smooth_penalty = infos.get("smooth_penalty", torch.zeros_like(rewards))
             reward_clip_frac = infos.get("reward_clip_frac", torch.zeros_like(rewards))
             boundary_distance = infos.get("boundary_distance")
             obstacle_surface_distance = infos.get("obstacle_surface_distance")
 
             hazard_collision = min_hazard_distance < float(reward_cfg.collision_dist)
+            if collision is None:
+                collision = hazard_collision
 
             done_flags = dones
             episode_steps += 1
-            episode_reached |= reached
-            episode_collision |= hazard_collision
 
             if done_flags.any():
-                success_mask = done_flags & episode_reached & ~episode_collision
+                success_mask = done_flags & success
                 success_count += success_mask.sum().item()
                 reached_count += (done_flags & reached).sum().item()
-                collision_count += (done_flags & hazard_collision).sum().item()
+                collision_count += (done_flags & collision).sum().item()
                 timeout_count += (done_flags & time_outs).sum().item()
                 episode_count += done_flags.sum().item()
                 ep_lengths = episode_steps[done_flags].float()
                 episode_len_sum += ep_lengths.sum().item()
-                episode_len_sq_sum += (ep_lengths ** 2).sum().item()
                 episode_len_count += done_flags.sum().item()
                 if success_mask.any():
                     success_steps_sum += episode_steps[success_mask].float().sum().item()
-                episode_collision[done_flags] = False
-                episode_reached[done_flags] = False
                 episode_steps[done_flags] = 0
 
             reward_sum += rewards.mean().item()
             goal_dist_sum += target_distance.mean().item()
             min_hazard_sum += min_hazard_distance.mean().item()
-            hazard_quantiles = torch.quantile(
-                min_hazard_distance,
-                torch.tensor([0.1, 0.5, 0.9], device=device),
-            )
-            hazard_p10_sum += hazard_quantiles[0].item()
-            hazard_p50_sum += hazard_quantiles[1].item()
-            hazard_p90_sum += hazard_quantiles[2].item()
-            action_sat_sum += (actions.abs() > 0.95).float().mean().item()
-            proj_sum += alignment.mean().item()
-            cmd_align_sum += command_alignment.mean().item()
             progress_sum += progress.mean().item()
-            obstacle_penalty_sum += obstacle_penalty.mean().item()
-            command_speed_sum += command_speed.mean().item()
-            body_speed_sum += body_speed.mean().item()
-            speed_ratio = body_speed / command_speed.clamp_min(1e-6)
-            speed_ratio_sum += speed_ratio.mean().item()
-            active_mask = command_speed > 0.1
-            if active_mask.any():
-                speed_ratio_active_sum += speed_ratio[active_mask].mean().item()
-                speed_ratio_active_count += 1
-            cmd_delta_sum += command_delta.mean().item()
-            cmd_delta_count += 1
-            cmd_zero_frac_sum += (command_speed < 0.1).float().mean().item()
+            safety_penalty_sum += safety_penalty.mean().item()
+            smooth_penalty_sum += smooth_penalty.mean().item()
             reward_clip_sum += reward_clip_frac.mean().item()
-            done_frac_sum += done_flags.float().mean().item()
 
             if boundary_distance is not None and obstacle_surface_distance is not None:
                 hazard_is_boundary = boundary_distance <= obstacle_surface_distance
                 boundary_collision = hazard_collision & hazard_is_boundary
                 obstacle_collision = hazard_collision & ~hazard_is_boundary
-                boundary_violation = boundary_distance < 0.0
-                boundary_violation_sum += boundary_violation.float().mean().item()
                 boundary_collision_count += (done_flags & boundary_collision).sum().item()
                 obstacle_collision_count += (done_flags & obstacle_collision).sum().item()
 
@@ -275,17 +226,24 @@ def train_reward_shaping(args) -> None:
             obs = next_obs
 
         alg.compute_returns(obs)
-        values = alg.storage.values
-        returns = alg.storage.returns
-        advantages_raw = returns - values
-        v_mean = values.mean().item()
-        v_std = values.std().item()
-        r_mean = returns.mean().item()
-        r_std = returns.std().item()
-        adv_mean = advantages_raw.mean().item()
-        adv_std = advantages_raw.std().item()
-        value_loss, policy_loss, approx_kl, clip_fraction = alg.update()
-        update_stats = getattr(alg, "last_stats", {})
+        update_out = alg.update()
+        if isinstance(update_out, dict):
+            value_loss = float(update_out.get("value", 0.0))
+            policy_loss = float(update_out.get("surrogate", 0.0))
+            approx_kl = float(update_out.get("approx_kl", float("nan")))
+            clip_fraction = float(update_out.get("clip_frac", float("nan")))
+        elif isinstance(update_out, (list, tuple)):
+            if len(update_out) == 2:
+                value_loss, policy_loss = update_out
+                approx_kl = float("nan")
+                clip_fraction = float("nan")
+            elif len(update_out) >= 4:
+                value_loss, policy_loss, approx_kl, clip_fraction = update_out[:4]
+            else:
+                raise ValueError(f"Unexpected PPO update output size: {len(update_out)}")
+        else:
+            raise ValueError(f"Unexpected PPO update output type: {type(update_out)}")
+        lr = float(getattr(alg, "learning_rate", 0.0))
 
         if episode_count > 0:
             success_rate = success_count / float(episode_count)
@@ -298,34 +256,14 @@ def train_reward_shaping(args) -> None:
         avg_reward = reward_sum / float(horizon)
         avg_goal_dist = goal_dist_sum / float(horizon)
         avg_min_hazard = min_hazard_sum / float(horizon)
-        avg_action_sat = action_sat_sum / float(horizon)
-        avg_proj = proj_sum / float(horizon)
-        avg_cmd_align = cmd_align_sum / float(horizon)
         avg_progress = progress_sum / float(horizon)
-        avg_obstacle_penalty = obstacle_penalty_sum / float(horizon)
-        avg_command_speed = command_speed_sum / float(horizon)
-        avg_body_speed = body_speed_sum / float(horizon)
-        avg_speed_ratio = speed_ratio_sum / float(horizon)
-        avg_speed_ratio_active = (
-            speed_ratio_active_sum / float(speed_ratio_active_count)
-            if speed_ratio_active_count > 0
-            else 0.0
-        )
-        avg_cmd_delta = cmd_delta_sum / float(cmd_delta_count) if cmd_delta_count > 0 else 0.0
-        avg_cmd_zero_frac = cmd_zero_frac_sum / float(horizon)
+        avg_safety_penalty = safety_penalty_sum / float(horizon)
+        avg_smooth_penalty = smooth_penalty_sum / float(horizon)
         avg_reward_clip = reward_clip_sum / float(horizon)
-        avg_hazard_p10 = hazard_p10_sum / float(horizon)
-        avg_hazard_p50 = hazard_p50_sum / float(horizon)
-        avg_hazard_p90 = hazard_p90_sum / float(horizon)
-        avg_boundary_violation = boundary_violation_sum / float(horizon)
-        avg_done_frac = done_frac_sum / float(horizon)
         if episode_len_count > 0:
             avg_episode_len = episode_len_sum / episode_len_count
-            var_episode_len = max(episode_len_sq_sum / episode_len_count - avg_episode_len ** 2, 0.0)
-            std_episode_len = math.sqrt(var_episode_len)
         else:
             avg_episode_len = 0.0
-            std_episode_len = 0.0
         if episode_count > 0:
             reach_rate = reached_count / float(episode_count)
             collision_rate = collision_count / float(episode_count)
@@ -341,40 +279,24 @@ def train_reward_shaping(args) -> None:
         action_std = float(alg.actor_critic.std.mean().item())
 
         if (iteration + 1) % 1 == 0:
-            elapsed = time.time() - interval_start
-            entropy = float(update_stats.get("entropy", 0.0))
-            lr = float(update_stats.get("lr", 0.0))
-            grad_norm = float(update_stats.get("grad_norm", 0.0))
-            value_clip_frac = float(update_stats.get("value_clip_frac", 0.0))
             log_line = (
                 f"iter {iteration + 1:05d} | success {success_rate:.3f} | reach {reach_rate:.3f} | "
                 f"collision {collision_rate:.3f} | boundary_collision_rate {boundary_collision_rate:.3f} | "
                 f"obstacle_collision_rate {obstacle_collision_rate:.3f} | timeout {timeout_rate:.3f} | "
                 f"cost {execution_cost:.1f} | "
-                f"avg_reward {avg_reward:.3f} | proj {avg_proj:.3f} | cmd_align {avg_cmd_align:.3f} | "
-                f"progress {avg_progress:.6f} | obstacle {avg_obstacle_penalty:.3f} | "
+                f"avg_reward {avg_reward:.3f} | "
+                f"progress {avg_progress:.6f} | safety {avg_safety_penalty:.3f} | smooth {avg_smooth_penalty:.3f} | "
                 f"goal_dist {avg_goal_dist:.3f} | min_hazard {avg_min_hazard:.3f} | "
-                f"cmd_speed {avg_command_speed:.3f} | body_speed {avg_body_speed:.3f} | "
-                f"speed_ratio {avg_speed_ratio:.3f} | speed_ratio_active {avg_speed_ratio_active:.3f} | "
-                f"cmd_delta {avg_cmd_delta:.3f} | "
-                f"cmd_zero {avg_cmd_zero_frac:.3f} | action_sat {avg_action_sat:.3f} | "
-                f"action_std {action_std:.3f} | policy_loss {policy_loss:.5f} | value_loss {value_loss:.5f} | "
+                f"reward_clip {avg_reward_clip:.3f} | action_std {action_std:.3f} | "
+                f"policy_loss {policy_loss:.5f} | value_loss {value_loss:.5f} | "
                 f"approx_kl {approx_kl:.5f} | clip_frac {clip_fraction:.3f} | "
-                f"entropy {entropy:.5f} | lr {lr:.6f} | grad_norm {grad_norm:.3f} | "
-                f"value_clip_frac {value_clip_frac:.3f} | "
-                f"Vmean {v_mean:.3f} | Vstd {v_std:.3f} | Rmean {r_mean:.3f} | Rstd {r_std:.3f} | "
-                f"adv_mean {adv_mean:.3f} | adv_std {adv_std:.3f} | reward_clip {avg_reward_clip:.3f} | "
-                f"hazard_p10 {avg_hazard_p10:.3f} | hazard_p50 {avg_hazard_p50:.3f} | hazard_p90 {avg_hazard_p90:.3f} | "
-                f"boundary_violation {avg_boundary_violation:.3f} | done_frac {avg_done_frac:.3f} | "
+                f"lr {lr:.6f} | "
                 f"ep_len_mean {avg_episode_len:.1f} | "
-                f"ep_len_std {std_episode_len:.1f} | init_goal_dist {start_goal_dist:.3f} | "
-                f"elapsed {elapsed:.2f}s | "
                 f"\n"
             )
             print(log_line)
             log_fp.write(log_line + "\n")
             log_fp.flush()
-            interval_start = time.time()
 
         if (iteration + 1) % save_interval == 0:
             save_path = os.path.join(log_dir, f"model_{iteration + 1}.pt")
@@ -414,8 +336,8 @@ def train_reward_shaping(args) -> None:
 if __name__ == "__main__":
     args = get_args()
     args.headless = True
-    args.compute_device_id = 3
-    args.sim_device_id = 3
-    args.rl_device = "cuda:3"
-    args.sim_device = "cuda:3"
+    args.compute_device_id = 0
+    args.sim_device_id = 0
+    args.rl_device = "cuda:0"
+    args.sim_device = "cuda:0"
     train_reward_shaping(args)

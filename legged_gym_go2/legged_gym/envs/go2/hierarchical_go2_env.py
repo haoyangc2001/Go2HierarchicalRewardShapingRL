@@ -210,11 +210,19 @@ class HierarchicalGO2Env:
                 update_mask = ~done_mask
                 reach_buf = torch.where(update_mask, reach_metric, reach_buf)
                 min_hazard_buf = torch.where(
-                    update_mask, self.base_env.min_hazard_distance, min_hazard_buf
+                    update_mask,
+                    torch.minimum(min_hazard_buf, self.base_env.min_hazard_distance),
+                    min_hazard_buf,
                 )
-                boundary_buf = torch.where(update_mask, self.base_env.boundary_distance, boundary_buf)
+                boundary_buf = torch.where(
+                    update_mask,
+                    torch.minimum(boundary_buf, self.base_env.boundary_distance),
+                    boundary_buf,
+                )
                 obstacle_surface_buf = torch.where(
-                    update_mask, self.base_env.obstacle_surface_distance, obstacle_surface_buf
+                    update_mask,
+                    torch.minimum(obstacle_surface_buf, self.base_env.obstacle_surface_distance),
+                    obstacle_surface_buf,
                 )
                 base_lin_vel_buf = torch.where(
                     update_mask.unsqueeze(1), self.base_env.base_lin_vel, base_lin_vel_buf
@@ -242,9 +250,8 @@ class HierarchicalGO2Env:
 
         hazard_distance_for_reward = min_hazard_true if min_hazard_true is not None else hazard_distance_est
 
-        reset_mask = self.base_env.episode_length_buf == 0
+        reset_mask = (self.base_env.episode_length_buf == 0) & ~aggregated_dones
         reward, done_flags, reached, success, collision, terminated, truncated, components = self._compute_reward(
-            high_level_obs=high_level_obs,
             desired_commands=desired_velocity_commands,
             target_distance=reach_metric,
             hazard_distance=hazard_distance_for_reward,
@@ -258,6 +265,11 @@ class HierarchicalGO2Env:
         self.prev_commands = desired_velocity_commands.detach().clone()
 
         # 6. Assemble info dictionary for logging/debugging
+        command_speed = torch.norm(desired_velocity_commands[:, :2], dim=1)
+        if base_lin_vel_buf is None:
+            body_speed = torch.zeros_like(command_speed)
+        else:
+            body_speed = torch.norm(base_lin_vel_buf[:, :2], dim=1)
         infos = {
             "time_outs": time_outs_buf,
             "reached": reached,
@@ -268,7 +280,7 @@ class HierarchicalGO2Env:
             "target_distance": reach_metric,
             "target_distance_est": target_distance_est,
             "reach_metric": reach_metric,
-            "min_hazard_distance": hazard_distance_est,
+            "min_hazard_distance": min_hazard_true,
             "min_hazard_distance_est": hazard_distance_est,
             "min_hazard_distance_true": min_hazard_true,
             "boundary_distance": boundary_buf,
@@ -276,11 +288,10 @@ class HierarchicalGO2Env:
             "base_lin_vel": base_lin_vel_buf,
             "desired_commands": desired_velocity_commands,
             "progress": components["progress"],
-            "alignment": components["alignment"],
-            "command_alignment": components["command_alignment"],
-            "obstacle_penalty": components["obstacle_penalty"],
-            "command_speed": components["command_speed"],
-            "body_speed": components["body_speed"],
+            "safety_penalty": components["safety_penalty"],
+            "smooth_penalty": components["smooth_penalty"],
+            "command_speed": command_speed,
+            "body_speed": body_speed,
             "command_delta": components["command_delta"],
             "reward_clip_frac": components["reward_clip_frac"],
         }
@@ -289,7 +300,6 @@ class HierarchicalGO2Env:
 
     def _compute_reward(
         self,
-        high_level_obs: torch.Tensor,
         desired_commands: torch.Tensor,
         target_distance: torch.Tensor,
         hazard_distance: torch.Tensor,
@@ -304,39 +314,22 @@ class HierarchicalGO2Env:
             self.prev_commands = desired_commands.detach().clone()
         goal_reached_dist = float(getattr(cfg, "goal_reached_dist", 0.3))
         collision_dist = float(getattr(cfg, "collision_dist", 0.35))
-        obstacle_avoid_dist = float(getattr(cfg, "obstacle_avoid_dist", 1.0))
-        progress_scale = float(getattr(cfg, "progress_scale", 10.0))
-        alignment_scale = float(getattr(cfg, "alignment_scale", 1.0))
-        obstacle_penalty_scale = float(getattr(cfg, "obstacle_penalty_scale", 1.0))
-        yaw_rate_scale = float(getattr(cfg, "yaw_rate_scale", 0.0))
-        action_smooth_scale = float(getattr(cfg, "action_smooth_scale", 0.0))
-        body_speed_scale = float(getattr(cfg, "body_speed_scale", 0.0))
-        command_alignment_scale = float(getattr(cfg, "command_alignment_scale", 0.0))
-        idle_speed = float(getattr(cfg, "idle_speed_threshold", 0.05))
-        idle_dist = float(getattr(cfg, "idle_distance_threshold", 0.5))
-        idle_penalty_scale = float(getattr(cfg, "idle_penalty_scale", 0.0))
-        success_reward = float(getattr(cfg, "success_reward", 100.0))
+        safe_distance = float(getattr(cfg, "safe_distance", 1.0))
+        progress_scale = float(getattr(cfg, "progress_scale", 1.0))
+        safe_scale = float(getattr(cfg, "safe_scale", 1.0))
+        smooth_scale = float(getattr(cfg, "smooth_scale", 0.0))
+        goal_reward = float(getattr(cfg, "goal_reward", 100.0))
         collision_penalty = float(getattr(cfg, "collision_penalty", 100.0))
         timeout_penalty = float(getattr(cfg, "timeout_penalty", 0.0))
-
-        body_vel_xy = self.high_level_env.extract_body_vel_xy(high_level_obs)
-        body_speed = torch.norm(body_vel_xy, dim=1)
-        target_dir = high_level_obs[:, 6:8]
-        alignment = torch.sum(body_vel_xy * target_dir, dim=1)
-        command_alignment = torch.sum(desired_commands[:, :2] * target_dir, dim=1)
-        yaw_rate = high_level_obs[:, 4] / self.high_level_env.ang_vel_scale
-
-        hazard_penalty = torch.clamp(
-            (obstacle_avoid_dist - hazard_distance) / obstacle_avoid_dist, min=0.0
-        )
-        command_speed = torch.norm(desired_commands[:, :2], dim=1)
 
         effective_prev_dist = torch.where(reset_mask, target_distance, self.prev_target_distance)
         progress = effective_prev_dist - target_distance
         effective_prev_cmd = torch.where(
             reset_mask.unsqueeze(1), desired_commands, self.prev_commands
         )
-        command_delta = torch.norm(desired_commands - effective_prev_cmd, dim=1)
+        command_delta_vec = desired_commands - effective_prev_cmd
+        command_delta = torch.norm(command_delta_vec, dim=1)
+        smooth_penalty = torch.sum(command_delta_vec ** 2, dim=1)
 
         reached = target_distance <= goal_reached_dist
         hazard_collision = hazard_distance <= collision_dist
@@ -348,32 +341,22 @@ class HierarchicalGO2Env:
         failure = terminated & ~reached
         collision = (hazard_collision | failure) & done_flags
 
-        active_mask = (~done_flags).float()
-        progress = progress * (~(terminated | truncated)).float()
-        alignment = alignment * active_mask
-        command_alignment = command_alignment * active_mask
-        hazard_penalty = hazard_penalty * active_mask
-        body_speed = body_speed * active_mask
-        command_speed = command_speed * active_mask
-        yaw_penalty = torch.abs(yaw_rate) * active_mask
-        command_delta = command_delta * active_mask
+        if safe_distance > 0.0:
+            safe_ratio = (safe_distance - hazard_distance) / safe_distance
+            safety_penalty = torch.where(
+                hazard_distance < safe_distance, -(safe_ratio ** 2), torch.zeros_like(hazard_distance)
+            )
+        else:
+            safety_penalty = torch.zeros_like(hazard_distance)
 
         reward = (
             progress_scale * progress
-            + alignment_scale * alignment
-            + command_alignment_scale * command_alignment
-            - obstacle_penalty_scale * hazard_penalty
-            - yaw_rate_scale * yaw_penalty
-            - action_smooth_scale * command_delta
+            + safe_scale * safety_penalty
+            - smooth_scale * smooth_penalty
         )
-        if body_speed_scale > 0.0:
-            reward = reward + body_speed_scale * body_speed
-        if idle_penalty_scale > 0.0:
-            idle_mask = (body_speed < idle_speed) & (target_distance > idle_dist)
-            reward = reward - idle_penalty_scale * idle_mask.float()
 
         success = reached & done_flags & ~collision
-        reward = torch.where(success, reward + success_reward, reward)
+        reward = torch.where(success, reward + goal_reward, reward)
         reward = torch.where(collision, reward - collision_penalty, reward)
         reward = torch.where(truncated, reward - timeout_penalty, reward)
 
@@ -389,11 +372,8 @@ class HierarchicalGO2Env:
 
         components = {
             "progress": progress,
-            "alignment": alignment,
-            "command_alignment": command_alignment,
-            "obstacle_penalty": hazard_penalty,
-            "command_speed": command_speed,
-            "body_speed": body_speed,
+            "safety_penalty": safety_penalty,
+            "smooth_penalty": smooth_penalty,
             "command_delta": command_delta,
             "reward_clip_frac": reward_clip_frac,
         }

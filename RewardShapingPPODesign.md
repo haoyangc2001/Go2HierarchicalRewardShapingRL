@@ -1,127 +1,170 @@
-# Reward-Shaping PPO 算法说明（高层导航）
+# IsaacGym 四足机器人分层导航：上层策略 Reward Shaping + 标准 PPO 训练方案（用于代码实现说明）
 
-## 摘要
-MCRA_RL 采用分层强化学习：低层为固定的行走控制器，高层为可训练的导航策略。高层策略输出速度指令，由 reward-shaping PPO 进行优化，奖励由目标进度、目标方向投影、角度误差和避障惩罚组成，并叠加到达/碰撞终止奖励。
+> 目标：在 IsaacGym 中训练**上层导航策略**，使四足机器人到达目标点，同时全程不碰撞障碍物。  
+> 分层结构：  
+> - **上层策略（需训练）**：感知环境，输出三维速度指令动作 `a_t = [v_x, v_y, ω]`（x轴速度、y轴速度、角速度），负责导航避障。  
+> - **底层策略（已训练、确定性、固定）**：接收上层指令并输出各关节动作，负责稳定跟踪控制。  
+> 方法：使用**标准 PPO**，通过**奖励塑形（reward shaping）**让上层与“障碍物 + 目标点”环境有效交互并学会避障到达。
 
-## 系统结构与交互
-- **低层控制**：预训练策略接收速度命令并输出关节动作（`legged_gym_go2/legged_gym/envs/go2/go2_env.py`）。
-- **高层控制**：可训练策略输出 \([v_x, v_y, v_{yaw}]\)（`legged_gym_go2/legged_gym/envs/go2/high_level_navigation_env.py`）。
-- **层间交互**：
-  - 高层动作先裁剪到 \([-1, 1]\)，按 `action_scale` 缩放；
-  - 再映射为底层命令：\(v_x \times 0.6\), \(v_y \times 0.2\), \(v_{yaw} \times 0.8\)；
-  - 每个高层动作执行 `high_level_action_repeat` 次低层步进（`legged_gym_go2/legged_gym/envs/go2/hierarchical_go2_env.py`）。
+---
 
-## 问题设定
-高层导航建模为 MDP \((s_t, a_t)\)：
-- 状态 \(s_t\)：包含朝向、机体速度、目标方向/距离、以及手动 lidar bins。
-- 动作 \(a_t\)：高层速度命令（单位无量纲，经过裁剪与缩放）。
-- 目标：在安全约束下尽快接近目标并到达目标区域。
+## 1. 上层与底层交互方式：宏步长环境封装（强烈建议）
 
-## 安全与距离度量
-环境在每步计算：
-- **目标距离**：\(d_t = \|p_{robot}^{xy} - p_{target}^{xy}\|\)
-- **最近危险距离**：`min_hazard_distance`（障碍物表面或边界的最近距离）
-对应实现：`legged_gym_go2/legged_gym/envs/go2/go2_env.py`
+由于底层控制器固定且确定性，上层采用**低频决策**：上层每一步动作在底层执行 `K` 个仿真步（sim steps）。
 
-## Reward-Shaping 奖励定义
-设执行的速度命令为 \(v_{cmd}\)（来自 `base_env.commands`），目标方向在机体坐标系下为单位向量 \(\hat{u}_{target}\)。
+### 高层 `step(action)` 推荐实现
 
-**(1) 目标方向投影与角度误差**
+- 输入：上层动作 `a_t = [v_x, v_y, ω]`（保持现有上层动作设计不变）
+- 内部：底层控制器执行 `K` 个 sim steps 来跟踪该速度指令
+- 返回：高层一步的 transition
+  - `o_{t+1}`：下一高层观测
+  - `r_t`：高层奖励（累计 K 步形成的 reward）
+  - `done`：若在 K 步内到达目标/碰撞/超时等则终止
+  - `info`：调试信息（dist、d_min、是否碰撞、是否到达等）
+
+### 奖励累计方式（宏步长）
+
+- 高层奖励：
+  \[
+  r_t = \sum_{i=1}^{K} r^{(i)}
+  \]
+- done 逻辑：
+  - 碰撞：立即 `done=True`
+  - 到达：立即 `done=True`
+  - 超时：`done=True`
+
+> 推荐 `K需根据控制频率与导航频率调整，这样上层 rollouts 更稳定，也更符合“导航决策频率 < 控制执行频率”的分层结构。
+
+---
+
+## 2. Reward Shaping 总体结构（上层 PPO 的核心）
+
+每个**高层 step** 的总奖励建议由 4 部分组成：
+
 \[
-R_{proj} = w_f \cdot (v_{cmd}^{xy} \cdot \hat{u}_{target})
-\]
-设 \( \hat{u}_{cmd} = \frac{v_{cmd}^{xy}}{\|v_{cmd}^{xy}\|} \)，角度误差
-\[
-\theta = \arccos(\text{clip}(\hat{u}_{cmd} \cdot \hat{u}_{target}, -1, 1))
-\]
-角度惩罚仅在 \(\|v_{cmd}^{xy}\| > 1e^{-3}\) 时启用：
-\[
-R_{ang} = - w_\theta \cdot \theta
-\]
-
-**(2) 避障惩罚**
-设 \(d_{haz}\) 为最近危险距离，避障距离为 \(d_{avoid}\)：
-\[
-r_3(d_{haz}) = \max\Big(1 - \frac{\max(d_{haz}, 0)}{d_{avoid}}, 0\Big)
-\]
-障碍惩罚项：
-\[
-R_{obs} = - w_o \cdot r_3(d_{haz})
+r_t = w_p r_{\text{progress}} + w_g r_{\text{goal}} + w_s r_{\text{safe}} + w_{sm} r_{\text{smooth}} \ +\ r_{\text{collision}}
 \]
 
-**(3) 目标进度奖励**
-设 \(d_{t-1}\) 为上一步目标距离：
-\[
-R_{prog} = w_p \cdot (d_{t-1} - d_t)
-\]
+其中各项定义如下（推荐使用稠密信号以提高学习效率）。
 
-**(4) 终止奖励**
-到达/碰撞/超时：
+---
+
+## 3. 进展奖励（Progress Reward，最关键）
+
+保证策略会朝目标前进，避免学成“原地不动不撞”。
+
+- 设目标距离：
+  \[
+  d_t = \|p_t - g\|
+  \]
+- 进展奖励采用“距离减少量”：
+  \[
+  r_{\text{progress}} = d_{t-1} - d_t
+  \]
+
+> 说明：  
+> - 这是一种密集、稳定、尺度鲁棒的 shaping。  
+> - 本质上等价于常见的潜在函数（potential）塑形形式之一。
+
+---
+
+## 4. 到达奖励（Goal Bonus）
+
+到达目标区域时给一次较大的正奖励，并终止 episode：
+
+- 若 `d_t < d_goal`：
+  - `done=True`
+  - \[
+    r_{\text{goal}} = +R_{\text{goal}}
+    \]
+- 否则：
+  - \[
+    r_{\text{goal}} = 0
+    \]
+
+> `R_goal` 通常要显著大于单步 progress 的累计值，以确保策略强烈偏好完成任务。
+
+---
+
+## 5. 安全避障奖励塑形（Safety Shaping，关键：稠密近障惩罚）
+
+仅靠“碰撞大惩罚”信号稀疏，会导致学习慢。必须加入**近障稠密惩罚**。
+
+### 5.1 近障信息（需要环境提供/可计算）
+
+在每个 sim step 或高层 step 内，获得/计算：
+- `d_min`：机器人到最近障碍物的距离（可来自传感器观测或几何计算）
+- `collision_detected`：是否发生碰撞（接触事件、碰撞 flag 等）
+
+### 5.2 近障惩罚（推荐：两段式 + 平滑）
+
+设安全距离阈值 `d_safe`：
+
 \[
-R_{term} =
+r_{\text{safe}}=
 \begin{cases}
- +r_{success}, & d_t \le d_{goal} \\
- -r_{collision}, & d_{haz} < d_{coll} \\
- -r_{timeout}, & time\_out
+0 & d_{\min} \ge d_{\text{safe}}\\
+-\left(\frac{d_{\text{safe}}-d_{\min}}{d_{\text{safe}}}\right)^2 & d_{\min}<d_{\text{safe}}
 \end{cases}
 \]
 
-**(5) 合成奖励与裁剪**
+- 当 `d_min` 大于安全阈值：不惩罚
+- 进入危险区：惩罚随接近程度平方增长（更强硬，更易学会保持距离）
+
+> 可选替代（更硬但更敏感）：指数惩罚 `-exp(-k*d_min)`。
+
+---
+
+## 6. 碰撞惩罚（Collision Penalty）+ 终止
+
+碰撞必须强力惩罚，并立即终止：
+
+- 若发生碰撞：
+  - `done=True`
+  - \[
+    r_{\text{collision}} = -R_{\text{coll}}
+    \]
+- 否则：
+  - \[
+    r_{\text{collision}} = 0
+    \]
+
+> `R_coll` 通常与 `R_goal` 同量级或更大，以形成“宁可绕路也不要撞”的强偏好。
+
+---
+
+## 7. 动作平滑（Smoothness，稳定高层指令，利于底层跟踪）
+
+为了防止高层输出抖动导致贴障/碰撞，建议在高层 step 上加入动作变化惩罚：
+
 \[
-R_t = R_{proj} + R_{ang} + R_{obs} + R_{prog} + R_{term}
-\]
-最终奖励会乘以 `reward_scale` 并根据 `reward_clip` 进行裁剪。
-
-对应实现：`legged_gym_go2/legged_gym/scripts/train_reward_shaping.py`
-
-## 终止逻辑与 time_outs
-- **到达**：\(d_t \le d_{goal}\)
-- **碰撞**：\(d_{haz} < d_{coll}\)
-- **终止**：\(terminated = reached \lor collision\)
-- **截断**：\(truncated = time\_out \land \lnot terminated\)
-PPO 仅在 `truncated` 时进行 bootstrap（通过 `time_outs` 字段）。
-
-## PPO 目标与损失
-采用标准 PPO：
-\[
-L(\theta) = -L^{CLIP}(\theta) + c_v L^V(\theta) - c_e \mathbb{E}_t[H(\pi_\theta)]
-\]
-
-**策略损失**
-\[
-L^{CLIP}(\theta) = \mathbb{E}_t\Big[\min\big(r_t A_t,\ \text{clip}(r_t,1-\epsilon,1+\epsilon)A_t\big)\Big]
-\]
-其中 \(r_t=\frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{old}}(a_t|s_t)}\)。
-
-**价值损失（clipped）**
-\[
-L^V(\theta) = \frac{1}{2}\mathbb{E}_t\Big[\max\big((V_\theta-R_t)^2,\ (V_\theta^{clip}-R_t)^2\big)\Big]
-\]
-
-**优势估计（GAE）**
-\[
-\delta_t = r_t + \gamma (1-done_t) V_{t+1} - V_t,\quad
-A_t = \delta_t + \gamma \lambda (1-done_t) A_{t+1}
+r_{\text{smooth}} = -\|a_t - a_{t-1}\|^2
 \]
 
-## 动作分布与数值稳定性
-- 策略分布为 `Normal(mean, std)`，动作通过 `tanh` 压缩到 \([-1, 1]\)。
-- 训练时对 log-prob 做变换修正（change-of-variables），保持 PPO 一致性。
-- 为避免溢出，训练中对 `logp_diff` 做 \([-20, 20]\) 裁剪，并在 `approx_kl` 超出阈值时提前停止更新。
+- 也可以只对角速度变化或横向速度变化惩罚（视你任务特性）
+- 平滑项通常权重较小，但对稳定性帮助很大
 
-## 训练流程
-1. Reset 环境，获得观测与初始距离。
-2. Rollout `num_steps_per_env` 步：
-   - 采样动作（tanh-squashed）
-   - 高层动作映射到底层速度命令并执行
-   - 计算奖励并记录终止、超时
-3. 计算 GAE 回报与优势
-4. PPO 更新（含 KL 早停）
-5. 记录日志与定期保存模型
+---
 
-## 关键实现位置
-- 高层环境与速度映射：`legged_gym_go2/legged_gym/envs/go2/high_level_navigation_env.py`
-- 层级封装与动作重复：`legged_gym_go2/legged_gym/envs/go2/hierarchical_go2_env.py`
-- 奖励整形训练脚本：`legged_gym_go2/legged_gym/scripts/train_reward_shaping.py`
-- PPO 算法实现：`rsl_rl/rsl_rl/algorithms/ppo.py`
-- PPO 模型定义：`rsl_rl/rsl_rl/modules/actor_critic.py`
+## 8. 终止条件（Episode Done）
+
+建议至少包含：
+
+- `collision == True`：碰撞终止
+- `dist_to_goal < d_goal`：到达终止
+- `time_step >= T_max`：超时终止（避免无限 episode）
+
+---
+
+## 9. PPO 算法层面需要做的改动
+
+标准 PPO，核心不变。需要确保：
+
+1. **Rollout 使用“高层 step”**
+2. Reward / done 的计算和存储使用上面 shaping 后的 `r_t`
+3. advantage / return 在高层时间尺度上计算（GAE/discount 等照常）
+4. 并行环境统计：episode reward、collision rate、success rate、平均最小距离等用于监控
+
+> 其余 PPO 细节使用标准ppo模式：clip、entropy bonus、value loss、GAE 等。
+
+---

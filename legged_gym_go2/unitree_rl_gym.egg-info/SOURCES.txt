@@ -4,6 +4,7 @@ legged_gym/__init__.py
 legged_gym/envs/__init__.py
 legged_gym/utils/__init__.py
 legged_gym/utils/helpers.py
+legged_gym/utils/hierarchical_env_utils.py
 legged_gym/utils/isaacgym_utils.py
 legged_gym/utils/logger.py
 legged_gym/utils/math.py

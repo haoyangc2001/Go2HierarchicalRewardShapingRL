@@ -200,20 +200,13 @@ class GO2HighLevelCfg(GO2RoughCfg):
         # Reward shaping parameters for high-level navigation.
         goal_reached_dist = 0.3
         collision_dist = 0.35
-        obstacle_avoid_dist = 1.2
-        progress_scale = 45.0
-        alignment_scale = 2.0
-        obstacle_penalty_scale = 0.6
-        yaw_rate_scale = 0.02
-        action_smooth_scale = 0.08
-        body_speed_scale = 1.0
-        command_alignment_scale = 0.6
-        idle_speed_threshold = 0.1
-        idle_distance_threshold = 0.5
-        idle_penalty_scale = 0.6
-        success_reward = 100.0
-        collision_penalty = 50.0
-        timeout_penalty = 10.0
+        safe_distance = 1.0
+        progress_scale = 5.0
+        goal_reward = 120.0
+        safe_scale = 2.0
+        smooth_scale = 0.05
+        collision_penalty = 120.0
+        timeout_penalty = 0.0
         reward_scale = 1.0
         reward_clip = 200.0
         terminate_on_safety_violation = True
@@ -252,10 +245,10 @@ class GO2HighLevelCfgPPO(LeggedRobotCfgPPO):
         max_iterations = 30000
         save_interval = 200
         # gh_dump_interval = 50  # iteration interval for dumping g/h tensors
-        resume = False
-        resume_path = "/home/caohy/repositories/MCRA_RL/legged_gym_go2/legged_gym/scripts/logs/high_level_go2/20260105-102613/model_1300.pt"  # 你的checkpoint路径
+        resume = True
+        resume_path = "/home/caohy/repositories/Go2HierarchicalRewardShapingRL/logs/high_level_go2_Reward_Shaping/20260120-191554/model_200.pt"  # 你的checkpoint路径
         # 底层策略模型路径
-        low_level_model_path = "/home/caohy/repositories/MCRA_RL/logs/rough_go2/Sep08_11-57-26_/model_18500.pt"
+        low_level_model_path = "/home/caohy/repositories/Go2HierarchicalRewardShapingRL/logs/rough_go2/Sep08_11-57-26_/model_18500.pt"
 
 _base_high_level_obs = 8
 _target_dim = GO2HighLevelCfg.target_lidar_num_bins

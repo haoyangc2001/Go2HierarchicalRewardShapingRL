@@ -8,7 +8,7 @@ MCRA_RL is a hierarchical reinforcement learning system for Unitree Go2 navigati
 - Training scripts: `legged_gym_go2/legged_gym/scripts/`
 - RL algorithms: `rsl_rl/rsl_rl/algorithms/`
 - Deployment: `legged_gym_go2/deploy/`
-- Logs/checkpoints: `/home/caohy/repositories/MCRA_RL/logs/`
+- Logs/checkpoints: `/home/caohy/repositories/Go2HierarchicalRewardShapingRL/logs/high_level_go2_Reward_Shaping/`
 
 ## Hierarchical RL Structure
 - Low-level (locomotion): `legged_gym_go2/legged_gym/envs/go2/go2_env.py`
@@ -19,7 +19,7 @@ MCRA_RL is a hierarchical reinforcement learning system for Unitree Go2 navigati
 ## Environment Overview
 ### Low-Level Environment (Locomotion)
 - Implements `GO2Robot` by extending `LeggedRobot`.
-- `step()` returns the standard `(obs, privileged_obs, reward, done, info)` tuple (no safety metrics in the return).
+- `step()` returns `(obs, privileged_obs, reward, done, info)`.
 - `reset()` calls `reset_idx` then performs a zero-action `step` to prime observations.
 - `_compute_safety_metrics()` computes:
   - `avoid_metric`: positive inside unsafe regions.
@@ -35,19 +35,20 @@ MCRA_RL is a hierarchical reinforcement learning system for Unitree Go2 navigati
 - Exposes helpers to derive distances from observations:
   - Target distance from target lidar intensity (or normalized distance if target lidar disabled).
   - Hazard distance from obstacle/boundary lidar intensity.
-- Maps high-level actions to low-level velocity commands in `update_velocity_commands` with fixed scaling and ranges (see mapping below).
+- Maps high-level actions to low-level velocity commands in `update_velocity_commands`.
 
 ### Hierarchical Wrapper
 - Loads a fixed low-level policy via `OnPolicyRunner` and exposes a high-level interface.
 - Each high-level action is repeated for `high_level_action_repeat` low-level steps; dones are aggregated.
-- Reward and termination signals are computed inside the hierarchical env using lidar-derived distances.
+- Reward and termination are computed inside the hierarchical env using true `reach_metric` and min hazard distance (minimum across repeated low-level steps).
 - `step()` returns `(obs, reward, done, info)` only.
 - Info fields (used for logging/diagnostics):
   - `time_outs`, `reached`, `success`, `collision`, `terminated`, `truncated`
-  - `target_distance`, `min_hazard_distance`
+  - `target_distance`, `target_distance_est`, `reach_metric`
+  - `min_hazard_distance`, `min_hazard_distance_est`, `min_hazard_distance_true`
   - `boundary_distance`, `obstacle_surface_distance`
   - `base_lin_vel`, `desired_commands`
-  - `progress`, `alignment`, `obstacle_penalty`, `command_speed`, `body_speed`, `command_delta`, `reward_clip_frac`
+  - `progress`, `safety_penalty`, `smooth_penalty`, `command_speed`, `body_speed`, `command_delta`, `reward_clip_frac`
 
 ### Vectorized Adapter
 - `HierarchicalVecEnv` provides a vectorized API for PPO training while delegating to the hierarchical environment.
@@ -67,8 +68,8 @@ In `update_velocity_commands`:
   - `vx = action[0] * 0.6`
   - `vy = action[1] * 0.2`
   - `vyaw = action[2] * 0.8`
-With default `action_scale = [1, 1, 1]`, the effective command ranges are:
-`vx in [-0.6, 0.6]`, `vy in [-0.2, 0.2]`, `vyaw in [-0.8, 0.8]`.
+With default `action_scale = [1.3, 1.0, 1.0]`, the effective command ranges are:
+`vx in [-0.78, 0.78]`, `vy in [-0.2, 0.2]`, `vyaw in [-0.8, 0.8]`.
 
 ## High-Level Observations
 - Base features (8):
@@ -86,18 +87,18 @@ With default `action_scale = [1, 1, 1]`, the effective command ranges are:
 
 ## Reward Design (High Level)
 - Implemented in `HierarchicalGO2Env._compute_reward`.
-- Target distance uses true `reach_metric`; hazard distance uses obstacle/boundary lidar intensity.
-- Dense terms:
-  - Progress: `progress_scale * (prev_target_distance - reach_metric)` (masked on terminated/truncated steps).
-  - Alignment: `alignment_scale * dot(v_body_xy, target_dir_body)`.
-  - Obstacle penalty: `- obstacle_penalty_scale * r(d)` where `r(d) = max((obstacle_avoid_dist - hazard_distance)/obstacle_avoid_dist, 0)`.
-  - Yaw penalty: `- yaw_rate_scale * abs(yaw_rate)`.
-  - Action smoothness: `- action_smooth_scale * ||cmd_t - cmd_{t-1}||`.
-  - Optional body speed bonus and idle penalty.
+- Target distance uses true `reach_metric`; hazard distance uses true min hazard distance.
+- Dense terms (per high-level step):
+  - Progress: `progress_scale * (prev_target_distance - target_distance)`.
+  - Safety shaping:
+    - If `d_min >= d_safe`, `safety = 0`.
+    - Else `safety = -((d_safe - d_min)/d_safe)^2`.
+  - Smoothness: `- smooth_scale * ||cmd_t - cmd_{t-1}||^2`.
 - Terminal terms:
   - Success bonus when `target_distance <= goal_reached_dist` on a done step.
   - Collision penalty when `hazard_distance <= collision_dist` (or base failure) on a done step.
   - Timeout penalty on truncation.
+- Reward scaling and clipping: `reward_scale`, `reward_clip`.
 - Done flags follow the base environment resets to avoid desyncs; success/collision are derived for logging.
 
 ## PPO Training (High Level)
@@ -109,58 +110,38 @@ With default `action_scale = [1, 1, 1]`, the effective command ranges are:
 ## Safety Metrics
 - Computed in `legged_gym_go2/legged_gym/envs/go2/go2_env.py`:
   - `avoid_metric`, `reach_metric`, `min_hazard_distance`, `obstacle_surface_distance`, `boundary_distance`.
-- Used for termination and diagnostics; not returned in `step()`.
+- Used for termination and diagnostics; not returned in low-level `step()`.
 - `boundary_distance < 0` indicates out-of-bounds; base env resets immediately.
 
 ## Logging and Outputs
 - Training logs/checkpoints are saved to:
-  `/home/caohy/repositories/MCRA_RL/logs/<experiment_name>/<timestamp>/`
+  `/home/caohy/repositories/Go2HierarchicalRewardShapingRL/logs/high_level_go2_Reward_Shaping/<timestamp>/`
 - The training log file is `training.log`.
-- Logged metrics include: `success`, `reach`, `collision`, `timeout`, `cost`, `avg_reward`, `proj`,
-  `progress`, `obstacle`, `goal_dist`, `min_hazard`, `cmd_speed`, `body_speed`,
-  `speed_ratio`, `speed_ratio_active`, `cmd_delta`, `cmd_zero`, `action_sat`, `done_frac`,
-  `action_std`, `policy_loss`, `value_loss`, `approx_kl`, `clip_frac`, `elapsed`,
-  plus PPO/diagnostic metrics such as `entropy`, `lr`, `grad_norm`, `value_clip_frac`, `Vmean`, `Vstd`,
-  `Rmean`, `Rstd`, `adv_mean`, `adv_std`, `reward_clip`, `hazard_p10`, `hazard_p50`,
-  `hazard_p90`, `boundary_violation`,
-  `boundary_collision_rate`, `obstacle_collision_rate`,
-  `ep_len_mean`, `ep_len_std`, `init_goal_dist`.
+- Logged metrics include: `success`, `reach`, `collision`, `boundary_collision_rate`, `obstacle_collision_rate`,
+  `timeout`, `cost`, `avg_reward`, `progress`, `safety`, `smooth`, `goal_dist`, `min_hazard`,
+  `reward_clip`, `action_std`, `policy_loss`, `value_loss`, `approx_kl`, `clip_frac`, `lr`, `ep_len_mean`.
 
 ### Training Log Field Meanings
 - `iter`: Iteration index (one rollout + one PPO update), starting from 1.
-- `success`: Success rate over finished episodes; success means reached target without collision in that episode.
+- `success`: Success rate over finished episodes; success means reached target without collision.
 - `reach`: Reach rate over finished episodes; `target_distance <= goal_reached_dist` on a done step.
-- `collision`: Collision rate over finished episodes; `hazard_distance <= collision_dist` on a done step.
+- `collision`: Collision rate over finished episodes; from `info.collision`.
+- `boundary_collision_rate`: Episode-level collision rate attributed to boundary hazards.
+- `obstacle_collision_rate`: Episode-level collision rate attributed to obstacles.
 - `timeout`: Timeout rate over finished episodes; `time_outs` and not reached/collision.
 - `cost`: Average high-level steps for successful episodes (lower is faster).
 - `avg_reward`: Mean reward per step (includes terminal rewards and clipping).
-- `proj`: Mean alignment `dot(v_body_xy, target_dir_body)`.
-- `progress`: Mean distance progress `prev_target_distance - target_distance` (masked on terminated/truncated steps).
-- `obstacle`: Mean obstacle penalty term `r(hazard_distance)` in `[0, 1]`.
+- `progress`: Mean distance progress `prev_target_distance - target_distance`.
+- `safety`: Mean safety shaping term (non-positive near hazards).
+- `smooth`: Mean smoothness penalty term.
 - `goal_dist`: Mean target distance (meters), derived from `reach_metric`.
 - `min_hazard`: Mean nearest hazard distance (meters, true value).
-- `cmd_speed`: Mean planar command speed `||v_cmd_xy||`.
-- `body_speed`: Mean planar body speed `||v_body_xy||`.
-- `speed_ratio`: Mean `body_speed / cmd_speed`.
-- `speed_ratio_active`: Mean `speed_ratio` where `cmd_speed > 0.1`.
-- `cmd_delta`: Mean `||cmd_t - cmd_{t-1}||`.
-- `cmd_zero`: Fraction where `cmd_speed < 0.1`.
-- `action_sat`: Fraction where `|a| > 0.95`.
+- `reward_clip`: Fraction of rewards clipped.
 - `action_std`: Mean policy std (exploration strength).
 - `policy_loss`, `value_loss`: PPO losses.
 - `approx_kl`, `clip_frac`: PPO diagnostics.
-- `entropy`, `lr`, `grad_norm`, `value_clip_frac`: PPO diagnostics.
-- `Vmean`, `Vstd`: Value function output mean/std.
-- `Rmean`, `Rstd`: Return mean/std.
-- `adv_mean`, `adv_std`: Advantage mean/std.
-- `reward_clip`: Fraction of rewards clipped.
-- `hazard_p10/p50/p90`: Quantiles of `min_hazard_distance`.
-- `boundary_violation`: Fraction where `boundary_distance < 0`.
-- `boundary_collision_rate`, `obstacle_collision_rate`: Episode-level collision rates by source.
-- `done_frac`: Mean done ratio per step.
-- `ep_len_mean`, `ep_len_std`: Episode length mean/std.
-- `init_goal_dist`: Mean initial target distance at the start of an iteration.
-- `elapsed`: Wall-clock seconds between logs.
+- `lr`: Current PPO learning rate.
+- `ep_len_mean`: Episode length mean.
 
 ## Configuration Entry Points
 - Reward shaping parameters: `legged_gym_go2/legged_gym/envs/go2/go2_config.py` (`GO2HighLevelCfg.reward_shaping`)
@@ -187,7 +168,7 @@ python legged_gym_go2/legged_gym/scripts/plot_env_layout.py
 
 Plot training logs:
 ```bash
-python legged_gym_go2/legged_gym/scripts/plot_training_results.py /home/caohy/repositories/MCRA_RL/logs/<experiment>/<timestamp>/training.log
+python legged_gym_go2/legged_gym/scripts/plot_training_results.py /home/caohy/repositories/Go2HierarchicalRewardShapingRL/logs/high_level_go2_Reward_Shaping/<timestamp>/training.log
 ```
 
 Deploy in Mujoco (example):
@@ -199,5 +180,5 @@ python legged_gym_go2/deploy/deploy_mujoco/deploy.py --checkpoint=model.pt --cfg
 - `train_reward_shaping.py` overrides CLI args in `__main__` (headless + device IDs). Edit there if you need different devices.
 - `HierarchicalGO2Env` sets `terminate_on_reach_avoid` based on reward shaping flags.
 - The low-level policy is fixed; high-level training should not modify it.
-- Reward computation lives inside the hierarchical environment and uses lidar-derived distances.
+- Reward computation lives inside the hierarchical environment and uses true distances.
 - If you change lidar bin counts or ranges, update `GO2HighLevelCfg` and the computed observation dimension.
