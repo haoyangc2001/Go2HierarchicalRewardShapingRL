@@ -138,6 +138,8 @@ class HierarchicalGO2Env:
             self.high_level_config.target_lidar_max_range = self.cfg.target_lidar_max_range
         if hasattr(self.cfg, "reach_metric_scale"):
             self.high_level_config.reach_metric_scale = self.cfg.reach_metric_scale
+        if hasattr(self.cfg, "action_scale"):
+            self.high_level_config.action_scale = self.cfg.action_scale
         if hasattr(self.cfg, "terrain"):
             terrain_length = getattr(self.cfg.terrain, "terrain_length", None)
             terrain_width = getattr(self.cfg.terrain, "terrain_width", None)
@@ -251,6 +253,7 @@ class HierarchicalGO2Env:
         hazard_distance_for_reward = min_hazard_true if min_hazard_true is not None else hazard_distance_est
 
         reset_mask = (self.base_env.episode_length_buf == 0) & ~aggregated_dones
+        target_dir_body = high_level_obs[:, 6:8] if high_level_obs.shape[1] >= 8 else None
         reward, done_flags, reached, success, collision, terminated, truncated, components = self._compute_reward(
             desired_commands=desired_velocity_commands,
             target_distance=reach_metric,
@@ -258,6 +261,8 @@ class HierarchicalGO2Env:
             base_dones=aggregated_dones,
             time_outs=time_outs_buf,
             reset_mask=reset_mask,
+            base_lin_vel=base_lin_vel_buf,
+            target_dir_body=target_dir_body,
         )
 
         # Update history buffers for the next step
@@ -290,6 +295,7 @@ class HierarchicalGO2Env:
             "progress": components["progress"],
             "safety_penalty": components["safety_penalty"],
             "smooth_penalty": components["smooth_penalty"],
+            "target_speed_reward": components["target_speed_reward"],
             "command_speed": command_speed,
             "body_speed": body_speed,
             "command_delta": components["command_delta"],
@@ -306,6 +312,8 @@ class HierarchicalGO2Env:
         base_dones: torch.Tensor,
         time_outs: torch.Tensor,
         reset_mask: torch.Tensor,
+        base_lin_vel=None,
+        target_dir_body=None,
     ):
         cfg = self.reward_cfg
         if self.prev_target_distance is None:
@@ -316,6 +324,7 @@ class HierarchicalGO2Env:
         collision_dist = float(getattr(cfg, "collision_dist", 0.35))
         safe_distance = float(getattr(cfg, "safe_distance", 1.0))
         progress_scale = float(getattr(cfg, "progress_scale", 1.0))
+        target_speed_scale = float(getattr(cfg, "target_speed_scale", 0.0))
         safe_scale = float(getattr(cfg, "safe_scale", 1.0))
         smooth_scale = float(getattr(cfg, "smooth_scale", 0.0))
         goal_reward = float(getattr(cfg, "goal_reward", 100.0))
@@ -355,6 +364,15 @@ class HierarchicalGO2Env:
             - smooth_scale * smooth_penalty
         )
 
+        target_speed_reward = torch.zeros_like(progress)
+        if target_speed_scale != 0.0 and base_lin_vel is not None and target_dir_body is not None:
+            # Project body-frame velocity onto the target direction (body frame).
+            target_speed = (base_lin_vel[:, :2] * target_dir_body).sum(dim=1)
+            target_speed = torch.clamp(target_speed, -1.0, 1.0)
+            safety_weight = torch.clamp((hazard_distance - safe_distance) / safe_distance, 0.0, 1.0)
+            target_speed_reward = target_speed_scale * target_speed * safety_weight
+            reward = reward + target_speed_reward
+
         success = reached & done_flags & ~collision
         reward = torch.where(success, reward + goal_reward, reward)
         reward = torch.where(collision, reward - collision_penalty, reward)
@@ -374,6 +392,7 @@ class HierarchicalGO2Env:
             "progress": progress,
             "safety_penalty": safety_penalty,
             "smooth_penalty": smooth_penalty,
+            "target_speed_reward": target_speed_reward,
             "command_delta": command_delta,
             "reward_clip_frac": reward_clip_frac,
         }

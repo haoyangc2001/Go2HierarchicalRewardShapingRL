@@ -200,13 +200,14 @@ class GO2HighLevelCfg(GO2RoughCfg):
         # Reward shaping parameters for high-level navigation.
         goal_reached_dist = 0.3
         collision_dist = 0.35
-        safe_distance = 1.0
-        progress_scale = 5.0
-        goal_reward = 120.0
-        safe_scale = 2.0
+        safe_distance = 1.5
+        progress_scale = 4.5
+        target_speed_scale = 0.1
+        goal_reward = 80.0
+        safe_scale = 4.0
         smooth_scale = 0.05
         collision_penalty = 120.0
-        timeout_penalty = 0.0
+        timeout_penalty = 10.0
         reward_scale = 1.0
         reward_clip = 200.0
         terminate_on_safety_violation = True
@@ -215,7 +216,7 @@ class GO2HighLevelCfg(GO2RoughCfg):
     class env(GO2RoughCfg.env):
         num_observations = 7  # placeholder; overwritten below
         num_actions = 3       # [vx, vy, vyaw]
-        high_level_action_repeat = 10  # number of low-level steps per high-level action
+        high_level_action_repeat = 5  # number of low-level steps per high-level action
         episode_length_s = 40
 
 class GO2HighLevelCfgPPO(LeggedRobotCfgPPO):
@@ -226,27 +227,27 @@ class GO2HighLevelCfgPPO(LeggedRobotCfgPPO):
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
         entropy_coef = 0.003
-        learning_rate = 3e-4
-        clip_param = 0.2
+        learning_rate = 3e-5
+        clip_param = 0.07
         value_clip_param = 0.2
         value_loss_coef = 0.5
         schedule = 'adaptive'
         desired_kl = 0.03
-        min_lr = 5e-6
-        max_lr = 5e-4
-        num_learning_epochs = 3
+        min_lr = 1e-5
+        max_lr = 1e-3
+        num_learning_epochs = 2
         num_mini_batches = 4
-        num_steps_per_env = 200 # increase horizon to give more time to reach the goal
+        num_steps_per_env = 400 # keep low-level horizon consistent with action repeat
         max_grad_norm = 1.0
 
     class runner(LeggedRobotCfgPPO.runner):
         run_name = ''
         experiment_name = 'high_level_go2'
         max_iterations = 30000
-        save_interval = 200
+        save_interval = 1000
         # gh_dump_interval = 50  # iteration interval for dumping g/h tensors
-        resume = True
-        resume_path = "/home/caohy/repositories/Go2HierarchicalRewardShapingRL/logs/high_level_go2_Reward_Shaping/20260120-191554/model_200.pt"  # 你的checkpoint路径
+        resume = False
+        resume_path = "/home/caohy/repositories/Go2HierarchicalRewardShapingRL/logs/high_level_go2_Reward_Shaping/20260125-104722/model_600.pt"  # 你的checkpoint路径
         # 底层策略模型路径
         low_level_model_path = "/home/caohy/repositories/Go2HierarchicalRewardShapingRL/logs/rough_go2/Sep08_11-57-26_/model_18500.pt"
 

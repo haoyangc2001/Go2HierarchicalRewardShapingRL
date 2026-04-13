@@ -149,11 +149,22 @@ def train_reward_shaping(args) -> None:
         goal_dist_sum = 0.0
         min_hazard_sum = 0.0
         progress_sum = 0.0
+        progress_sq_sum = 0.0
         safety_penalty_sum = 0.0
+        safety_penalty_sq_sum = 0.0
         smooth_penalty_sum = 0.0
+        smooth_penalty_sq_sum = 0.0
+        target_speed_reward_sum = 0.0
+        target_speed_reward_sq_sum = 0.0
         reward_clip_sum = 0.0
         episode_len_sum = 0.0
         episode_len_count = 0.0
+        cmd_corr_count = 0
+        cmd_corr_sum_x = 0.0
+        cmd_corr_sum_y = 0.0
+        cmd_corr_sum_x2 = 0.0
+        cmd_corr_sum_y2 = 0.0
+        cmd_corr_sum_xy = 0.0
 
         for step in range(horizon):
             actions = alg.act(obs, obs)
@@ -181,7 +192,9 @@ def train_reward_shaping(args) -> None:
             progress = infos.get("progress", torch.zeros_like(rewards))
             safety_penalty = infos.get("safety_penalty", torch.zeros_like(rewards))
             smooth_penalty = infos.get("smooth_penalty", torch.zeros_like(rewards))
+            target_speed_reward = infos.get("target_speed_reward", torch.zeros_like(rewards))
             reward_clip_frac = infos.get("reward_clip_frac", torch.zeros_like(rewards))
+            command_speed = infos.get("command_speed", torch.zeros_like(rewards))
             boundary_distance = infos.get("boundary_distance")
             obstacle_surface_distance = infos.get("obstacle_surface_distance")
 
@@ -210,9 +223,20 @@ def train_reward_shaping(args) -> None:
             goal_dist_sum += target_distance.mean().item()
             min_hazard_sum += min_hazard_distance.mean().item()
             progress_sum += progress.mean().item()
+            progress_sq_sum += (progress ** 2).mean().item()
             safety_penalty_sum += safety_penalty.mean().item()
+            safety_penalty_sq_sum += (safety_penalty ** 2).mean().item()
             smooth_penalty_sum += smooth_penalty.mean().item()
+            smooth_penalty_sq_sum += (smooth_penalty ** 2).mean().item()
+            target_speed_reward_sum += target_speed_reward.mean().item()
+            target_speed_reward_sq_sum += (target_speed_reward ** 2).mean().item()
             reward_clip_sum += reward_clip_frac.mean().item()
+            cmd_corr_count += command_speed.numel()
+            cmd_corr_sum_x += command_speed.sum().item()
+            cmd_corr_sum_y += progress.sum().item()
+            cmd_corr_sum_x2 += (command_speed ** 2).sum().item()
+            cmd_corr_sum_y2 += (progress ** 2).sum().item()
+            cmd_corr_sum_xy += (command_speed * progress).sum().item()
 
             if boundary_distance is not None and obstacle_surface_distance is not None:
                 hazard_is_boundary = boundary_distance <= obstacle_surface_distance
@@ -235,8 +259,8 @@ def train_reward_shaping(args) -> None:
         elif isinstance(update_out, (list, tuple)):
             if len(update_out) == 2:
                 value_loss, policy_loss = update_out
-                approx_kl = float("nan")
-                clip_fraction = float("nan")
+                approx_kl = float(getattr(alg, "last_approx_kl", float("nan")))
+                clip_fraction = float(getattr(alg, "last_clip_frac", float("nan")))
             elif len(update_out) >= 4:
                 value_loss, policy_loss, approx_kl, clip_fraction = update_out[:4]
             else:
@@ -244,6 +268,22 @@ def train_reward_shaping(args) -> None:
         else:
             raise ValueError(f"Unexpected PPO update output type: {type(update_out)}")
         lr = float(getattr(alg, "learning_rate", 0.0))
+        num_minibatches = int(getattr(alg, "last_num_minibatches", 0))
+        num_updates = int(getattr(alg, "last_num_updates", 0))
+        num_skipped = int(getattr(alg, "last_num_skipped", 0))
+        num_skipped_kl = int(getattr(alg, "last_num_skipped_kl", 0))
+        num_skipped_nonfinite = int(getattr(alg, "last_num_skipped_nonfinite", 0))
+        adv_mean = float(getattr(alg, "last_adv_mean", float("nan")))
+        adv_std = float(getattr(alg, "last_adv_std", float("nan")))
+        ratio_mean = float(getattr(alg, "last_ratio_mean", float("nan")))
+        ratio_std = float(getattr(alg, "last_ratio_std", float("nan")))
+        ratio_abs_mean = float(getattr(alg, "last_ratio_abs_mean", float("nan")))
+        ratio_min = float(getattr(alg, "last_ratio_min", float("nan")))
+        ratio_max = float(getattr(alg, "last_ratio_max", float("nan")))
+        if num_minibatches > 0:
+            skip_frac = num_skipped / float(num_minibatches)
+        else:
+            skip_frac = 0.0
 
         if episode_count > 0:
             success_rate = success_count / float(episode_count)
@@ -257,9 +297,30 @@ def train_reward_shaping(args) -> None:
         avg_goal_dist = goal_dist_sum / float(horizon)
         avg_min_hazard = min_hazard_sum / float(horizon)
         avg_progress = progress_sum / float(horizon)
+        avg_progress_sq = progress_sq_sum / float(horizon)
+        progress_var = max(avg_progress_sq - avg_progress ** 2, 0.0)
         avg_safety_penalty = safety_penalty_sum / float(horizon)
+        avg_safety_penalty_sq = safety_penalty_sq_sum / float(horizon)
+        safety_var = max(avg_safety_penalty_sq - avg_safety_penalty ** 2, 0.0)
         avg_smooth_penalty = smooth_penalty_sum / float(horizon)
+        avg_smooth_penalty_sq = smooth_penalty_sq_sum / float(horizon)
+        smooth_var = max(avg_smooth_penalty_sq - avg_smooth_penalty ** 2, 0.0)
+        avg_target_speed_reward = target_speed_reward_sum / float(horizon)
+        avg_target_speed_reward_sq = target_speed_reward_sq_sum / float(horizon)
+        target_speed_var = max(avg_target_speed_reward_sq - avg_target_speed_reward ** 2, 0.0)
         avg_reward_clip = reward_clip_sum / float(horizon)
+        if cmd_corr_count > 1:
+            mean_x = cmd_corr_sum_x / cmd_corr_count
+            mean_y = cmd_corr_sum_y / cmd_corr_count
+            cov_xy = (cmd_corr_sum_xy / cmd_corr_count) - mean_x * mean_y
+            var_x = (cmd_corr_sum_x2 / cmd_corr_count) - mean_x ** 2
+            var_y = (cmd_corr_sum_y2 / cmd_corr_count) - mean_y ** 2
+            if var_x > 0.0 and var_y > 0.0:
+                cmd_goal_corr = cov_xy / ((var_x * var_y) ** 0.5)
+            else:
+                cmd_goal_corr = 0.0
+        else:
+            cmd_goal_corr = 0.0
         if episode_len_count > 0:
             avg_episode_len = episode_len_sum / episode_len_count
         else:
@@ -286,11 +347,21 @@ def train_reward_shaping(args) -> None:
                 f"cost {execution_cost:.1f} | "
                 f"avg_reward {avg_reward:.3f} | "
                 f"progress {avg_progress:.6f} | safety {avg_safety_penalty:.3f} | smooth {avg_smooth_penalty:.3f} | "
+                f"target_speed {avg_target_speed_reward:.3f} | "
+                f"progress_var {progress_var:.6f} | safety_var {safety_var:.6f} | "
+                f"smooth_var {smooth_var:.6f} | target_speed_var {target_speed_var:.6f} | "
                 f"goal_dist {avg_goal_dist:.3f} | min_hazard {avg_min_hazard:.3f} | "
+                f"cmd_goal_corr {cmd_goal_corr:.4f} | "
                 f"reward_clip {avg_reward_clip:.3f} | action_std {action_std:.3f} | "
                 f"policy_loss {policy_loss:.5f} | value_loss {value_loss:.5f} | "
                 f"approx_kl {approx_kl:.5f} | clip_frac {clip_fraction:.3f} | "
+                f"adv_mean {adv_mean:.6f} | adv_std {adv_std:.6f} | "
+                f"ratio_mean {ratio_mean:.6f} | ratio_std {ratio_std:.6f} | "
+                f"ratio_abs_mean {ratio_abs_mean:.6f} | ratio_min {ratio_min:.6f} | ratio_max {ratio_max:.6f} | "
                 f"lr {lr:.6f} | "
+                f"ppo_updates {num_updates:d} | ppo_skipped {num_skipped:d} | "
+                f"ppo_skip_frac {skip_frac:.3f} | ppo_skip_kl {num_skipped_kl:d} | "
+                f"ppo_skip_nonfinite {num_skipped_nonfinite:d} | "
                 f"ep_len_mean {avg_episode_len:.1f} | "
                 f"\n"
             )
@@ -336,8 +407,8 @@ def train_reward_shaping(args) -> None:
 if __name__ == "__main__":
     args = get_args()
     args.headless = True
-    args.compute_device_id = 0
-    args.sim_device_id = 0
-    args.rl_device = "cuda:0"
-    args.sim_device = "cuda:0"
+    args.compute_device_id = 1
+    args.sim_device_id = 1
+    args.rl_device = "cuda:1"
+    args.sim_device = "cuda:1"
     train_reward_shaping(args)

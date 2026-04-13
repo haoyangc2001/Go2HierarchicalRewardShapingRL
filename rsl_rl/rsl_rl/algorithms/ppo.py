@@ -122,16 +122,34 @@ class PPO:
     def compute_returns(self, last_critic_obs):
         last_values= self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)
+        self.last_adv_mean = getattr(self.storage, "last_raw_adv_mean", float("nan"))
+        self.last_adv_std = getattr(self.storage, "last_raw_adv_std", float("nan"))
+        self.last_adv_norm_mean = getattr(self.storage, "last_adv_mean", float("nan"))
+        self.last_adv_norm_std = getattr(self.storage, "last_adv_std", float("nan"))
 
     def update(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
+        mean_approx_kl = 0
+        mean_clip_frac = 0
+        num_updates = 0
+        num_minibatches = 0
+        num_skipped = 0
+        num_skipped_nonfinite = 0
+        num_skipped_kl = 0
+        ratio_sum = 0.0
+        ratio_sq_sum = 0.0
+        ratio_abs_sum = 0.0
+        ratio_count = 0
+        ratio_min = float("inf")
+        ratio_max = float("-inf")
         if self.actor_critic.is_recurrent:
             generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
             old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
+                num_minibatches += 1
 
 
                 self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
@@ -141,11 +159,30 @@ class PPO:
                 sigma_batch = self.actor_critic.action_std
                 entropy_batch = self.actor_critic.entropy
 
-                # KL
-                if self.desired_kl != None and self.schedule == 'adaptive':
+                if not torch.isfinite(actions_log_prob_batch).all():
+                    num_skipped += 1
+                    num_skipped_nonfinite += 1
+                    continue
+                if not torch.isfinite(value_batch).all():
+                    num_skipped += 1
+                    num_skipped_nonfinite += 1
+                    continue
+                if not torch.isfinite(mu_batch).all() or not torch.isfinite(sigma_batch).all():
+                    num_skipped += 1
+                    num_skipped_nonfinite += 1
+                    continue
+                if not torch.isfinite(entropy_batch).all():
+                    num_skipped += 1
+                    num_skipped_nonfinite += 1
+                    continue
+
+                # KL for adaptive schedule
+                if self.desired_kl is not None and self.schedule == 'adaptive':
                     with torch.inference_mode():
+                        sigma_safe = torch.clamp(sigma_batch, min=1e-6)
+                        old_sigma_safe = torch.clamp(old_sigma_batch, min=1e-6)
                         kl = torch.sum(
-                            torch.log(sigma_batch / old_sigma_batch + 1.e-5) + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch)) / (2.0 * torch.square(sigma_batch)) - 0.5, axis=-1)
+                            torch.log(sigma_safe / old_sigma_safe + 1.e-5) + (torch.square(old_sigma_safe) + torch.square(old_mu_batch - mu_batch)) / (2.0 * torch.square(sigma_safe)) - 0.5, axis=-1)
                         kl_mean = torch.mean(kl)
 
                         if kl_mean > self.desired_kl * 2.0:
@@ -158,7 +195,31 @@ class PPO:
 
 
                 # Surrogate loss
-                ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
+                log_ratio = actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch)
+                if not torch.isfinite(log_ratio).all():
+                    num_skipped += 1
+                    num_skipped_nonfinite += 1
+                    continue
+                ratio = torch.exp(torch.clamp(log_ratio, -20.0, 20.0))
+                ratio_detached = ratio.detach()
+                ratio_sum += ratio_detached.sum().item()
+                ratio_sq_sum += (ratio_detached ** 2).sum().item()
+                ratio_abs_sum += (ratio_detached - 1.0).abs().sum().item()
+                ratio_count += ratio_detached.numel()
+                ratio_min = min(ratio_min, ratio_detached.min().item())
+                ratio_max = max(ratio_max, ratio_detached.max().item())
+                approx_kl = torch.mean(torch.squeeze(old_actions_log_prob_batch) - actions_log_prob_batch)
+                clip_frac = torch.mean((torch.abs(ratio - 1.0) > self.clip_param).float())
+                if self.desired_kl is not None and self.schedule == 'adaptive':
+                    approx_kl_value = approx_kl.detach().item()
+                    if approx_kl_value > self.desired_kl * 2.0:
+                        self.learning_rate = max(self.min_lr, self.learning_rate / 1.5)
+                        for param_group in self.optimizer.param_groups:
+                            param_group['lr'] = self.learning_rate
+                        # Skip this update to avoid destabilizing the policy.
+                        num_skipped += 1
+                        num_skipped_kl += 1
+                        continue
                 surrogate = -torch.squeeze(advantages_batch) * ratio
                 surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param,
                                                                                 1.0 + self.clip_param)
@@ -176,6 +237,10 @@ class PPO:
                     value_loss = (returns_batch - value_batch).pow(2).mean()
 
                 loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+                if not torch.isfinite(loss):
+                    num_skipped += 1
+                    num_skipped_nonfinite += 1
+                    continue
 
                 # Gradient step
                 self.optimizer.zero_grad()
@@ -185,10 +250,42 @@ class PPO:
 
                 mean_value_loss += value_loss.item()
                 mean_surrogate_loss += surrogate_loss.item()
+                mean_approx_kl += approx_kl.item()
+                mean_clip_frac += clip_frac.item()
+                num_updates += 1
 
-        num_updates = self.num_learning_epochs * self.num_mini_batches
+        self.last_num_minibatches = num_minibatches
+        self.last_num_updates = num_updates
+        self.last_num_skipped = num_skipped
+        self.last_num_skipped_kl = num_skipped_kl
+        self.last_num_skipped_nonfinite = num_skipped_nonfinite
+        if ratio_count > 0:
+            ratio_mean = ratio_sum / ratio_count
+            ratio_var = max(ratio_sq_sum / ratio_count - ratio_mean ** 2, 0.0)
+            self.last_ratio_mean = ratio_mean
+            self.last_ratio_std = ratio_var ** 0.5
+            self.last_ratio_abs_mean = ratio_abs_sum / ratio_count
+            self.last_ratio_min = ratio_min
+            self.last_ratio_max = ratio_max
+        else:
+            self.last_ratio_mean = float("nan")
+            self.last_ratio_std = float("nan")
+            self.last_ratio_abs_mean = float("nan")
+            self.last_ratio_min = float("nan")
+            self.last_ratio_max = float("nan")
+
+        if num_updates == 0:
+            self.storage.clear()
+            self.last_approx_kl = float("nan")
+            self.last_clip_frac = float("nan")
+            return float("nan"), float("nan")
+
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
+        mean_approx_kl /= num_updates
+        mean_clip_frac /= num_updates
         self.storage.clear()
 
+        self.last_approx_kl = mean_approx_kl
+        self.last_clip_frac = mean_clip_frac
         return mean_value_loss, mean_surrogate_loss
