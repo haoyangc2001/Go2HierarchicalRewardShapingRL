@@ -16,3 +16,7 @@ Thumbs.db
 /logs/logs/high_level_go2_reward_shaping/
 /logs
 .vscode/launch.json
+
+# Local-only notes
+AGENTS.md
+DEBUG_SUMMARY.md
